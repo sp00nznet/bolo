@@ -84,12 +84,14 @@ puzzle layouts. Reversing those formats happens in parallel (see
   runtime** — leaving only **~70 functions of actual Bolo game logic** to reverse.
   The interrupt/shim surface is small and mapped (DOS, EGA, keyboard, mouse, timer,
   FP emulator). See [`docs/CLASSIFY.md`](docs/CLASSIFY.md).
-- 🔨 **Lifting (Phase 3):** all 182 detected functions / 35K instructions are
-  mechanically lifted to **41,631 lines of C** ([`tools/lift_bolo.py`](tools/lift_bolo.py)
-  → `src/recomp/gen/`) against the `recomp16` runtime, with a build skeleton
-  (`CMakeLists.txt`, `src/main.c`). Remaining gaps are quantified: 174 x87 FPU
-  escapes, 160 indirect-dispatch sites, and expanding the set to the ~591 runtime
-  call targets. Compiling needs MSVC + SDL2 (not wired in this environment yet).
+- 🔨 **Lifting (Phase 3):** the game is mechanically lifted to C
+  ([`tools/lift_bolo.py`](tools/lift_bolo.py) → `src/recomp/gen/`) against the
+  `recomp16` runtime, with a build skeleton (`CMakeLists.txt`, `src/main.c`).
+  Far-call closure expands coverage to **225 functions** and confirms the QB
+  runtime itself is lifted from the image (only 10 far targets unresolved).
+  Remaining gaps are quantified and documented: x87 FPU escapes, indirect-dispatch
+  sites, and segment-aware near-call resolution. Compiling needs MSVC + SDL2 (not
+  wired in this environment yet).
 
 | Phase | What | State |
 |------:|------|-------|

@@ -35,6 +35,10 @@ FUNC_RE = re.compile(
     r"end = (0x[0-9A-Fa-f]+), size = (\d+), far = (true|false)")
 
 
+ENTRY = 0x20120          # CS:IP 2011:0010 from the PKLITE footer
+MAXLEN = 0x2000          # cap a region scan so we don't run deep into data
+
+
 def load_funcs():
     funcs = []
     for line in open(TOML):
@@ -45,10 +49,61 @@ def load_funcs():
     return funcs
 
 
+def discover(image, seeds):
+    """Far-call-closure function discovery.
+
+    The analyzer's MSC-prologue heuristic only finds 182 functions, but the
+    binary is QuickBASIC: nearly all cross-function/runtime transfers are FAR
+    calls, whose target `far_seg*16+off` is an absolute image offset (image is
+    based at 0). Iterating that closure pulls the QB runtime and the rest of the
+    game in from the image instead of stubbing them. (Near calls are intra-
+    segment and can't be resolved to an absolute offset without segment context,
+    so we don't use them for discovery -- intra-function flow is handled by the
+    lifter's labels anyway.)
+    """
+    from decode16 import OpType
+    N = len(image)
+    known = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        starts = sorted(known)
+        for i, s in enumerate(starts):
+            nxt = starts[i + 1] if i + 1 < len(starts) else N
+            end = min(s + MAXLEN, nxt, N)
+            if end <= s:
+                continue
+            try:
+                insns = Decoder(image[s:end], base_offset=s).decode_all()
+            except Exception:
+                continue
+            for ins in insns:
+                op = ins.op1
+                if ins.mnemonic in ("call", "jmp") and op and op.type == OpType.FAR:
+                    t = op.far_seg * 16 + op.disp
+                    if 0 <= t < N and t not in known:
+                        known.add(t)
+                        changed = True
+    return known
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     image = open(IMAGE, "rb").read()
-    funcs = load_funcs()
+    N = len(image)
+    detected = load_funcs()
+    far_of = {start: far for name, start, end, far in detected}
+
+    # expand via far-call closure, then recompute boundaries (end = next start)
+    seeds = {start for _, start, _, _ in detected} | {ENTRY}
+    starts = sorted(discover(image, seeds))
+    n_detected = len(detected)
+    funcs = []
+    for i, s in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else N
+        end = min(end, s + MAXLEN, N)
+        funcs.append((f"res_{s:06X}", s, end, far_of.get(s, True)))
+
     known = {start: name for name, start, end, far in funcs}
     defined = set(known.values())
 
@@ -110,7 +165,9 @@ def main():
         f.write("};\nconst int g_dispatch_count = "
                 f"{len(funcs)};\n")
 
-    print(f"functions:   {len(funcs)}  (lifted ok {n_ok}, failed {n_fail})")
+    print(f"functions:   {len(funcs)}  (was {n_detected} detected; "
+          f"+{len(funcs) - n_detected} via far-call closure)")
+    print(f"lifted ok {n_ok}, failed {n_fail}")
     print(f"instructions:{n_insns}")
     print(f"chunks:      {len(chunks)}  ({CHUNK} funcs each) in {OUT}")
     print(f"referenced:  {len(referenced)}  undefined->stubbed {len(stubs)}")

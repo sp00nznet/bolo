@@ -71,10 +71,19 @@ See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
   - **160 indirect-dispatch sites** (`call/jmp [reg/mem]`) — wire through the
     generated `recomp_dispatch.c` table.
   - 24 far/indirect jmp/call, minor `into`/`grp4`.
-- [ ] **Expand the function set.** The analyzer found 182 functions, but the code
-      references ~591 call targets (the QB runtime + the unlifted CRT/startup at
-      `0x20120`). Seed function detection from the call targets and lift them so the
-      590 stubs become real code (lifts the QB runtime straight from the image).
+- [x] **Expanded the function set via far-call closure** (`discover()` in
+      lift_bolo.py): 182 → **225 functions**, and confirmed the QB runtime *is*
+      lifted (DOS dispatch `0x152C3`, graphics `0x120C2`, hot helper `0x13CC2` all
+      land in defined functions). Only **10 far-call targets remain unresolved**.
+- [ ] **Near-call resolution (the main remaining lift gap).** ~556 stubs are
+      *near*-call targets. Near calls are segment-relative, but the lifter resolves
+      them as `func_start + disp`, which is only correct for forward intra-segment
+      calls and wraps for backward ones (130 targets wrap clean out of the image).
+      Measured: 0/502 near targets coincide with a real detected start — many are
+      intra-procedure compiler helpers, not separate functions. **Fix:** assign
+      each function a segment base (from the far-call `seg` values — runtime=0x1183,
+      etc.) and compute `segbase*16 + ((abs_off + disp) & 0xFFFF)`. This is a
+      run/debug-phase task (needs the lifter's near-call handler to take a segbase).
 - [ ] **Relocations** (deferred 1d) — reconstruct so segment-arithmetic is correct
       at runtime (needed once we execute, not to compile).
 
