@@ -47,11 +47,11 @@ typedef struct CPU {
     union { struct { uint8_t cl, ch; }; uint16_t cx; uint32_t ecx; };
     union { struct { uint8_t dl, dh; }; uint16_t dx; uint32_t edx; };
 
-    /* Index and pointer registers */
-    uint16_t si;
-    uint16_t di;
-    uint16_t bp;
-    uint16_t sp;
+    /* Index and pointer registers (16/32-bit; 386 ops use the e-forms) */
+    union { uint16_t si; uint32_t esi; };
+    union { uint16_t di; uint32_t edi; };
+    union { uint16_t bp; uint32_t ebp; };
+    union { uint16_t sp; uint32_t esp; };
 
     /* Segment registers */
     uint16_t cs;
@@ -168,6 +168,61 @@ static inline void set_szp16(CPU *cpu, uint16_t result)
     if (result == 0)             cpu->flags |= FLAG_ZF;
     if (result & 0x8000)         cpu->flags |= FLAG_SF;
     if (parity8(result & 0xFF))  cpu->flags |= FLAG_PF;
+}
+
+/* ---------- 32-bit (386) memory / stack / flag helpers ---------- */
+static inline uint32_t mem_read32(CPU *cpu, uint16_t seg, uint16_t off)
+{
+    return (uint32_t)mem_read16(cpu, seg, off) |
+           ((uint32_t)mem_read16(cpu, seg, (uint16_t)(off + 2)) << 16);
+}
+static inline void mem_write32(CPU *cpu, uint16_t seg, uint16_t off, uint32_t val)
+{
+    mem_write16(cpu, seg, off, (uint16_t)val);
+    mem_write16(cpu, seg, (uint16_t)(off + 2), (uint16_t)(val >> 16));
+}
+static inline void push32(CPU *cpu, uint32_t val)
+{
+    cpu->sp -= 4;
+    mem_write32(cpu, cpu->ss, cpu->sp, val);
+}
+static inline uint32_t pop32(CPU *cpu)
+{
+    uint32_t val = mem_read32(cpu, cpu->ss, cpu->sp);
+    cpu->sp += 4;
+    return val;
+}
+static inline void set_szp32(CPU *cpu, uint32_t result)
+{
+    cpu->flags &= ~(FLAG_SF | FLAG_ZF | FLAG_PF);
+    if (result == 0)              cpu->flags |= FLAG_ZF;
+    if (result & 0x80000000u)     cpu->flags |= FLAG_SF;
+    if (parity8(result & 0xFF))   cpu->flags |= FLAG_PF;
+}
+static inline void flags_logic32(CPU *cpu, uint32_t result)
+{
+    cpu->flags &= ~(FLAG_CF | FLAG_OF);
+    set_szp32(cpu, result);
+}
+static inline uint32_t flags_sub32(CPU *cpu, uint32_t a, uint32_t b)
+{
+    uint32_t result = a - b;
+    cpu->flags &= ~(FLAG_CF | FLAG_OF | FLAG_AF | FLAG_SF | FLAG_ZF | FLAG_PF);
+    if (a < b)                                          cpu->flags |= FLAG_CF;
+    if (((a ^ b) & (a ^ result)) & 0x80000000u)         cpu->flags |= FLAG_OF;
+    if ((a ^ b ^ result) & 0x10)                        cpu->flags |= FLAG_AF;
+    set_szp32(cpu, result);
+    return result;
+}
+static inline uint32_t flags_add32(CPU *cpu, uint32_t a, uint32_t b)
+{
+    uint32_t result = a + b;
+    cpu->flags &= ~(FLAG_CF | FLAG_OF | FLAG_AF | FLAG_SF | FLAG_ZF | FLAG_PF);
+    if (result < a)                                     cpu->flags |= FLAG_CF;
+    if (((a ^ result) & (b ^ result)) & 0x80000000u)    cpu->flags |= FLAG_OF;
+    if ((a ^ b ^ result) & 0x10)                        cpu->flags |= FLAG_AF;
+    set_szp32(cpu, result);
+    return result;
 }
 
 /* Full flags for ADD (8-bit) */

@@ -99,9 +99,9 @@ puzzle layouts. Reversing those formats happens in parallel (see
 | 0 | Reconnaissance | ✅ [`docs/RECON.md`](docs/RECON.md) |
 | 1 | Unpack PKLITE + disassemble | ✅ |
 | 2 | Classify QB runtime vs game logic | ✅ [`docs/CLASSIFY.md`](docs/CLASSIFY.md) |
-| 3 | Lift 8086 → C | 🔨 in progress — 932 funcs / 70K lines, call graph resolved |
-| 4 | Shim EGA/DOS → SDL2 | ⬜ |
-| 5 | Build & debug to playable | ⬜ |
+| 3 | Lift 8086 → C | ✅ 932 funcs / 70K lines, call graph resolved |
+| 4 | Shim EGA/DOS → SDL2 | ✅ recomp16 runtime wired |
+| 5 | Build & debug to playable | 🔨 **builds + runs**; executing lifted startup |
 | 6 | Ship native + extras | ⬜ |
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap and milestones.
@@ -119,8 +119,17 @@ bolo/
 
 ## Building
 
-Nothing to build yet — we're still unpacking the patient. Build instructions land
-with Phase 5.
+It builds! With MSYS2 mingw64 (gcc + SDL2):
+
+```bash
+bash scripts/build.sh                      # -> build/bolo.exe (native, 2 MB)
+SDL_VIDEODRIVER=dummy ./build/bolo.exe work/BOLO3_image.bin
+```
+
+Regenerate the lifted C first if needed (see `docs/NEXT.md`). The recompiled
+binary currently boots and executes the original QuickBASIC startup (segment
+setup + self-relocation) before reaching the first computed-jump trampoline —
+the active debugging frontier (see `docs/PLAN.md` Phase 5).
 
 ## Credits & legal
 

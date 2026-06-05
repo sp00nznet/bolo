@@ -93,11 +93,20 @@ See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
 - [ ] DOS file I/O for the asset files → host fopen.
 - [ ] PC-speaker sound → SDL2 audio (optional, gated behind the in-game toggle).
 
-### Phase 5 — Build & debug
-- [ ] CMake project (from template), 32-bit host build hosting the 16-bit memory
-      model, fixed base, large stack.
-- [ ] Boot → main menu → select puzzle → move Mr. Bolo → solve room 1.
-- [ ] Debug loop against the runtime's trace/crash handlers.
+### Phase 5 — Build & debug  🔨 in progress — IT BUILDS AND RUNS
+- [x] **Builds.** MSYS2 mingw64 gcc 15.2 + SDL2. `scripts/build.sh` → `build/bolo.exe`
+      (2 MB native). All 932 functions + runtime compile; only fixes needed were
+      adding 32-bit register unions + `*32` flag helpers to `cpu.h` and dropping the
+      civ-specific `startup.c`.
+- [x] **Runs without crashing.** Loads the image at linear 0, calls the entry
+      `res_020120`, and executes real lifted startup code — segment setup + a
+      `rep movsb` self-relocation — then returns cleanly (exit 0).
+- [ ] **Next blocker: computed control flow.** The QB startup trampolines via
+      `push 0x34; retf` (a computed far jump). The lifter renders `retf` as a C
+      `return`, so it returns to `main` instead of following the trampoline. Need
+      `retf`/indirect `call`/`jmp` to dispatch through `g_dispatch` (now testable in
+      the build/run loop). This is the same indirect-dispatch work noted in Phase 3.
+- [ ] Then: boot → main menu → select puzzle → move Mr. Bolo → solve room 1.
 
 ### Phase 6 — Ship & extend
 - [ ] Native Windows build, no DOSBox.

@@ -24,14 +24,15 @@ endif()
 
 file(GLOB GENERATED_SOURCES "src/recomp/gen/recomp_*.c")
 
+# NOTE: src/recomp/startup.c is intentionally NOT built -- it is the civ-specific
+# bootstrap; src/main.c is our entry point.
 set(RUNTIME_SOURCES
-    src/runtime/cpu.c
-    src/runtime/dos_compat.c
-    src/runtime/startup.c
-    src/runtime/hal/input.c
-    src/runtime/hal/timer.c
-    src/runtime/hal/video.c
-    src/runtime/platform/sdl_platform.c
+    src/recomp/cpu.c
+    src/recomp/dos_compat.c
+    src/recomp/hal/input.c
+    src/recomp/hal/timer.c
+    src/recomp/hal/video.c
+    src/recomp/platform/sdl_platform.c
 )
 
 add_executable(bolo
@@ -42,7 +43,7 @@ add_executable(bolo
 
 target_include_directories(bolo PRIVATE
     src
-    src/runtime
+    src/recomp
     src/recomp/gen
 )
 
