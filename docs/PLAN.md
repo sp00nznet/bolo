@@ -43,18 +43,19 @@ See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
       MZ is fully runnable and the lifter can tell segment-reference words from
       data. (Deferred — not needed for analysis; see FORMATS.md / unpklite TODO.)
 
-### Phase 2 — Classification  ⬅ current
-- [ ] **Fingerprint the QuickBASIC runtime.** Identify the `B$…` runtime routines
-      (string/array/file/error/graphics helpers) among the 182 functions using the
-      QB45 runtime as the reference — these are library code we don't reverse.
-      This is the analogue of SDK-classification in larger projects and should
-      account for a big fraction of the functions.
-- [ ] Isolate the **actual Bolo game logic** (the BASIC program compiled to x86):
-      main menu, puzzle loader, move/animation engine, laser/collision rules,
-      renderer (`PUT`/`GET`), `.OVx`/`.JFT`/`.SCR` file I/O.
-- [ ] Map the interrupt/BIOS surface actually used (INT 10h video, INT 16h kbd,
-      INT 21h file I/O, PIT/PC-speaker for sound). The QB runtime mediates most of
-      this, so the shim list is "implement the QB runtime entry points we hit."
+### Phase 2 — Classification  ✅ (see CLASSIFY.md)
+- [x] **Fingerprinted the QuickBASIC runtime via the call graph.** 81% of far
+      calls (1,783) land in one segment (`0x1183`) across 77 entry points = the
+      BCOM45 runtime. Game logic is the other 18% (397 calls, ~70 routines in ~13
+      segments). The RE target is just **~70 game routines**.
+- [x] Mapped the **interrupt surface / shim list**: INT 21h (file), INT 10h
+      (`SCREEN 9` graphics), INT 16h (kbd), INT 33h (mouse), INT 1Ah (timer), and
+      the **INT 34h–3Dh MS floating-point emulator**.
+- [x] Found first **anchors**: DOS dispatch `0x152C3`, graphics `0x120C2/0x18893`,
+      input-poll `0x10C59`; plus the DGROUP string-descriptor table format.
+- [ ] **2-next.** Name the 77 runtime entry points by behavior; trace startup →
+      game `main` → puzzle loader (asset-offset refs) → move loop (hot seg
+      `0x00EE00`). Feeds Phase 3 + FORMATS.
 
 ### Phase 3 — Lifting
 - [ ] `lift16.py` over the symbol table → C in `src/recomp/gen/`.

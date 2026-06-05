@@ -80,13 +80,17 @@ puzzle layouts. Reversing those formats happens in parallel (see
   error-message table (`RETURN without GOSUB`, `CASE ELSE expected`, …) gives it
   away. That means much of the binary is the *known* QB runtime, and the graphics
   are BASIC `SCREEN 9` EGA `PUT`/`GET` sprites — a big head start on the rest.
+- ✅ **Classified (Phase 2):** the call graph shows **81% of calls go into the QB
+  runtime** — leaving only **~70 functions of actual Bolo game logic** to reverse.
+  The interrupt/shim surface is small and mapped (DOS, EGA, keyboard, mouse, timer,
+  FP emulator). See [`docs/CLASSIFY.md`](docs/CLASSIFY.md).
 
 | Phase | What | State |
 |------:|------|-------|
 | 0 | Reconnaissance | ✅ [`docs/RECON.md`](docs/RECON.md) |
 | 1 | Unpack PKLITE + disassemble | ✅ |
-| 2 | Classify QB runtime vs game logic | 🔨 next |
-| 3 | Lift 8086 → C | ⬜ |
+| 2 | Classify QB runtime vs game logic | ✅ [`docs/CLASSIFY.md`](docs/CLASSIFY.md) |
+| 3 | Lift 8086 → C | 🔨 next |
 | 4 | Shim EGA/DOS → SDL2 | ⬜ |
 | 5 | Build & debug to playable | ⬜ |
 | 6 | Ship native + extras | ⬜ |
