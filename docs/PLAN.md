@@ -57,10 +57,26 @@ See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
       game `main` → puzzle loader (asset-offset refs) → move loop (hot seg
       `0x00EE00`). Feeds Phase 3 + FORMATS.
 
-### Phase 3 — Lifting
-- [ ] `lift16.py` over the symbol table → C in `src/recomp/gen/`.
-- [ ] Wire the `recomp16` runtime (CPU state struct, INT handlers, VGA framebuffer,
-      keyboard) from `pc/tools/runtime/recomp16/`.
+### Phase 3 — Lifting  🔨 in progress
+- [x] Wrote the driver `tools/lift_bolo.py` (decode16 + lift16, far calls resolved
+      via base-0 image layout so `seg*16+off` = image offset).
+- [x] Lifted all **182 detected functions / 35,210 instructions → 41,631 lines of
+      C** in `src/recomp/gen/` (chunked + forward-decl header + dispatch table).
+      No lift exceptions.
+- [x] Wired the `recomp16` runtime into `src/runtime/`, wrote `src/main.c`
+      (loads image at linear 0, seeds regs from the footer) and `CMakeLists.txt`.
+- [ ] **Gaps to close** (categorized from the generated comments):
+  - **174 x87 FPU escapes** — translate the float math (Bolo uses floats); also the
+    `INT 34h–3Dh` emulator entry points map here.
+  - **160 indirect-dispatch sites** (`call/jmp [reg/mem]`) — wire through the
+    generated `recomp_dispatch.c` table.
+  - 24 far/indirect jmp/call, minor `into`/`grp4`.
+- [ ] **Expand the function set.** The analyzer found 182 functions, but the code
+      references ~591 call targets (the QB runtime + the unlifted CRT/startup at
+      `0x20120`). Seed function detection from the call targets and lift them so the
+      590 stubs become real code (lifts the QB runtime straight from the image).
+- [ ] **Relocations** (deferred 1d) — reconstruct so segment-arithmetic is correct
+      at runtime (needed once we execute, not to compile).
 
 ### Phase 4 — Shimming
 - [ ] EGA/VGA output → SDL2 framebuffer (16-color planar → RGBA).
