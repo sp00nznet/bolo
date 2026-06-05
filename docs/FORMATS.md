@@ -39,10 +39,28 @@ So it's a **custom Soleau/QB codec** (likely a plane-aware or marker-based RLE).
 OV2 starts with a `0xFD` run — possibly a QB `BSAVE` image (magic `0xFD`) for the
 title screen, a different container than OV0/OV1.
 
-**Next:** trace the loader in the lifted code (the routine that opens `BOLO3.OV1`
-and writes EGA video memory / calls the QB graphics runtime) to recover the exact
-decode, then round-trip-validate by rendering to PNG. Decode harness already
-stubbed in `work/` (see git history of this file).
+**Rendering pipeline (traced in the lifted code):** the EGA-touching functions are
+mapped — game-side blitters at `0xEDC3, 0xEE3F, 0xF1EE, 0xF227, 0xF308, 0xF4BD,
+0xF610, 0xF773` (these set `ES=0xA000` and drive the `0x3CE` graphics-controller
+plane registers) plus the QB graphics runtime around `0x112xx / 0x124xx / 0x153xx`.
+`res_00F1EE` is a `PUT`-style blitter: it computes the screen offset
+`y * rowbytes(es:[0x4A]) + x + screenbase(ds:[0x3B9E])`, loads a far pointer to a
+source array via `les si,[0x10C]`, sets `ES=0xA000`, and copies. So the flow is:
+
+```
+BOLO3.OVx  --loader/decoder-->  QB sprite array (planar)  --PUT (res_00F1EE)-->  EGA A000
+```
+
+Because the blitter consumes a *planar array* but the OVx file is smaller than the
+planar bitmap, the **custom decompression happens in the loader** that fills the
+array (OVx is not a raw QB `GET`/`PUT` array). 
+
+**Next:** read the loader (opens `BOLO3.OV1`, parses the 16-byte header, expands
+into the array `les si,[0x10C]` points at) to recover the codec. Easiest validated
+once a build runs (dump the array post-load and diff against a re-encode); until
+then, the decode harness lives in this file's git history. The PUT geometry above
+(`rowbytes`, `screenbase`, plane order via `0x3CE`) already fixes how to render the
+array once decoded.
 
 ## `BOLO3.OV2` — image / level art
 

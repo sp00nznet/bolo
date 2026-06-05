@@ -90,6 +90,29 @@ Mapping each `INT` site to its enclosing far-call target:
 
 These are the first runtime/HAL entry points to name and shim.
 
+## Runtime entry points named so far (by usage in the lifted C)
+
+The lift is now legible enough to name QB runtime routines from how the game calls
+them. First identifications:
+
+| Runtime routine | Address | Role |
+|----------------|---------|------|
+| `res_013CC2` | `1183:2492` | **QB string assign** `LET s$=...` — called as `(src_descriptor, dest_var_off)`; it's the hottest routine (337 calls). |
+| `res_0140EA` | `1183:28BA` | string/var housekeeping (paired after assigns) |
+| `res_01133A` | `1130:003A` | string helper (game-segment thunk) |
+| `res_0152C3` | runtime | DOS dispatch core (INT 21h ×31) — file open/read/write |
+| `res_0120C2` / `res_018893` | runtime | EGA graphics BIOS wrappers (INT 10h) |
+| `res_00F1EE` | game | `PUT`-style EGA blitter (array → `A000`); see FORMATS.md |
+| `res_010C59` | game | keyboard+mouse input poll (INT 16h/33h) |
+
+Example of how readable the lifted game logic now is — assigning a filename to a
+BASIC string variable before opening it:
+```c
+cpu->ax = 0xEE8;  push16(cpu, cpu->ax);   /* push &"BOLO3.OV1" descriptor */
+cpu->ax = 0x6A;   push16(cpu, cpu->ax);   /* push dest var slot          */
+res_013CC2(cpu);                          /* B$ string-assign            */
+```
+
 ## Next
 
 1. **Name the 77 runtime entry points** by behavior — which wrap `INT 10h`
