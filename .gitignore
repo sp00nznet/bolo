@@ -1,0 +1,43 @@
+# Build artifacts
+build/
+out/
+cmake-build-*/
+*.obj
+*.o
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+CMakeSettings.json
+CMakeUserPresets.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Scratch / regeneratable analysis output
+work/
+*.json.bak
+
+# Loose extraction copy (canonical originals live in original/)
+extracted/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# NOTE: the original shareware game files in original/ ARE committed on purpose.
+# They are tiny (~185 KB total), freely-distributable 1993 shareware, and serve
+# as the ground-truth reference for the recompilation. The generated/unpacked
+# artifacts below are also kept so the repo is self-contained.
+!original/
