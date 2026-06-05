@@ -60,9 +60,8 @@ See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
 ### Phase 3 — Lifting  🔨 in progress
 - [x] Wrote the driver `tools/lift_bolo.py` (decode16 + lift16, far calls resolved
       via base-0 image layout so `seg*16+off` = image offset).
-- [x] Lifted all **182 detected functions / 35,210 instructions → 41,631 lines of
-      C** in `src/recomp/gen/` (chunked + forward-decl header + dispatch table).
-      No lift exceptions.
+- [x] Lifted to C in `src/recomp/gen/` (chunked + forward-decl header + dispatch
+      table). **No lift exceptions.**
 - [x] Wired the `recomp16` runtime into `src/runtime/`, wrote `src/main.c`
       (loads image at linear 0, seeds regs from the footer) and `CMakeLists.txt`.
 - [ ] **Gaps to close** (categorized from the generated comments):
@@ -75,15 +74,16 @@ See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
       lift_bolo.py): 182 → **225 functions**, and confirmed the QB runtime *is*
       lifted (DOS dispatch `0x152C3`, graphics `0x120C2`, hot helper `0x13CC2` all
       land in defined functions). Only **10 far-call targets remain unresolved**.
-- [ ] **Near-call resolution (the main remaining lift gap).** ~556 stubs are
-      *near*-call targets. Near calls are segment-relative, but the lifter resolves
-      them as `func_start + disp`, which is only correct for forward intra-segment
-      calls and wraps for backward ones (130 targets wrap clean out of the image).
-      Measured: 0/502 near targets coincide with a real detected start — many are
-      intra-procedure compiler helpers, not separate functions. **Fix:** assign
-      each function a segment base (from the far-call `seg` values — runtime=0x1183,
-      etc.) and compute `segbase*16 + ((abs_off + disp) & 0xFFFF)`. This is a
-      run/debug-phase task (needs the lifter's near-call handler to take a segbase).
+- [x] **Segment-aware near-call resolution — done.** Implemented `scan_far_targets`
+      + `near_call_target` + segment-aware `discover()`: each function gets a
+      segment base (exact from far-call `seg` values, inferred for the rest), near
+      calls are resolved as `segbase*16 + ((aoff + pos + rel) & 0xFFFF)` with the
+      true rel recovered from the raw bytes, and near-call disps are rewritten so
+      the lifter resolves them correctly. **Result: 182 → 932 functions, 56,821
+      instructions, near-call resolution 0% → 99% (1466/1467 hit a real start),
+      stubs 566 → 14.** The program entry `res_020120` is now lifted and in the
+      dispatch table. The 14 remaining stubs are all out-of-image far targets
+      (BIOS/absolute/runtime-allocated segments) — correctly left as stubs.
 - [ ] **Relocations** (deferred 1d) — reconstruct so segment-arithmetic is correct
       at runtime (needed once we execute, not to compile).
 

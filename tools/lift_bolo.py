@@ -49,26 +49,78 @@ def load_funcs():
     return funcs
 
 
-def discover(image, seeds):
-    """Far-call-closure function discovery.
+def scan_far_targets(image):
+    """Whole-image scan for far transfers; returns {target_abs: segbase}.
 
-    The analyzer's MSC-prologue heuristic only finds 182 functions, but the
-    binary is QuickBASIC: nearly all cross-function/runtime transfers are FAR
-    calls, whose target `far_seg*16+off` is an absolute image offset (image is
-    based at 0). Iterating that closure pulls the QB runtime and the rest of the
-    game in from the image instead of stubbing them. (Near calls are intra-
-    segment and can't be resolved to an absolute offset without segment context,
-    so we don't use them for discovery -- intra-function flow is handled by the
-    lifter's labels anyway.)
+    `9A` = CALL far ptr16:16, `EA` = JMP far ptr16:16. The target is
+    seg*16+off, an absolute image offset (image based at 0), and `seg` is the
+    segment that code runs under -- exactly the segment base we need to resolve
+    that function's *near* calls. (A few hits land in data; bogus ones get
+    filtered out later because they don't decode/aren't reached.)
+    """
+    N = len(image)
+    seg_of = {}
+    for i in range(N - 4):
+        if image[i] in (0x9A, 0xEA):
+            off = image[i + 1] | (image[i + 2] << 8)
+            seg = image[i + 3] | (image[i + 4] << 8)
+            t = seg * 16 + off
+            if 0 <= t < N:
+                seg_of.setdefault(t, seg)
+    return seg_of
+
+
+def near_call_target(ins, func_start, segbase):
+    """Correct absolute target of a near `call rel16`, segment-aware.
+
+    A near call keeps CS, so the target lives in the caller's segment. Recover
+    the real rel from the raw bytes (the decoder masks disp to 16 bits, losing
+    the sign for backward calls) and wrap within the 64 KB segment:
+        target = segbase*16 + ((Aoff + pos_after + rel) & 0xFFFF)
+    where Aoff is the caller's offset within its segment.
+    """
+    raw = ins.raw
+    if not raw or raw[0] != 0xE8 or len(raw) < 3:
+        return None
+    rel = int.from_bytes(raw[1:3], "little", signed=True)
+    pos_after = ins.address + len(raw)          # blob-relative (relative to func_start)
+    aoff = func_start - segbase * 16
+    seg_rel = (aoff + pos_after + rel) & 0xFFFF
+    return segbase * 16 + seg_rel
+
+
+def segbase_for(addr, far_sorted):
+    """Segment base for an address: the nearest far-target segbase at or below it
+    (functions in a segment are contiguous and sprinkled with far entries)."""
+    import bisect
+    i = bisect.bisect_right([a for a, _ in far_sorted], addr) - 1
+    if i >= 0:
+        return far_sorted[i][1]
+    return addr >> 4 & 0xF000        # last-resort fallback
+
+
+def discover(image, detected, far_seg):
+    """Segment-aware function discovery (far + near closure).
+
+    Seeds with far-call targets (each carrying its exact segbase), the entry,
+    and the analyzer's detected functions; then follows near calls using each
+    function's segment base, assigning newly-found near targets the caller's
+    segbase (same segment). Returns {start: segbase}.
     """
     from decode16 import OpType
     N = len(image)
-    known = set(seeds)
+    segbase = dict(far_seg)
+    segbase[ENTRY] = 0x2011
+    far_sorted = sorted(far_seg.items())
+    for _, s, _, _ in detected:                 # detected funcs: infer segbase
+        segbase.setdefault(s, segbase_for(s, far_sorted))
+
     changed = True
     while changed:
         changed = False
-        starts = sorted(known)
+        starts = sorted(segbase)
         for i, s in enumerate(starts):
+            sb = segbase[s]
             nxt = starts[i + 1] if i + 1 < len(starts) else N
             end = min(s + MAXLEN, nxt, N)
             if end <= s:
@@ -81,10 +133,15 @@ def discover(image, seeds):
                 op = ins.op1
                 if ins.mnemonic in ("call", "jmp") and op and op.type == OpType.FAR:
                     t = op.far_seg * 16 + op.disp
-                    if 0 <= t < N and t not in known:
-                        known.add(t)
+                    if 0 <= t < N and t not in segbase:
+                        segbase[t] = op.far_seg
                         changed = True
-    return known
+                elif ins.mnemonic == "call" and op and op.type == OpType.REL16:
+                    t = near_call_target(ins, s, sb)
+                    if t is not None and 0 <= t < N and t not in segbase:
+                        segbase[t] = sb        # same segment as caller
+                        changed = True
+    return segbase
 
 
 def main():
@@ -94,9 +151,11 @@ def main():
     detected = load_funcs()
     far_of = {start: far for name, start, end, far in detected}
 
-    # expand via far-call closure, then recompute boundaries (end = next start)
-    seeds = {start for _, start, _, _ in detected} | {ENTRY}
-    starts = sorted(discover(image, seeds))
+    from decode16 import OpType
+    # segment-aware discovery -> {start: segbase}; recompute boundaries
+    far_seg = scan_far_targets(image)
+    segbase = discover(image, detected, far_seg)
+    starts = sorted(segbase)
     n_detected = len(detected)
     funcs = []
     for i, s in enumerate(starts):
@@ -106,15 +165,29 @@ def main():
 
     known = {start: name for name, start, end, far in funcs}
     defined = set(known.values())
+    start_set = set(starts)
 
     lifter = Lifter(hdr_size=0, known_funcs=known)
     bodies = []
     referenced = set()
     n_ok = n_fail = n_insns = n_unhandled = 0
+    near_total = near_hit = 0           # near-call resolution quality metric
 
     for name, start, end, far in funcs:
         try:
             insns = Decoder(image[start:end], base_offset=start).decode_all()
+            sb = segbase[start]
+            # rewrite near-call disps to the segment-correct target so the lifter
+            # (target = func_start + disp) resolves them to the right function
+            for ins in insns:
+                op = ins.op1
+                if ins.mnemonic == "call" and op and op.type == OpType.REL16:
+                    t = near_call_target(ins, start, sb)
+                    if t is not None:
+                        op.disp = t - start
+                        near_total += 1
+                        if t in start_set:
+                            near_hit += 1
             c = lifter.lift_function(name, insns, start, is_far=far)
             n_insns += len(insns)
             n_unhandled += c.count("UNHANDLED") + c.count("needs dispatch")
@@ -165,11 +238,14 @@ def main():
         f.write("};\nconst int g_dispatch_count = "
                 f"{len(funcs)};\n")
 
+    near_pct = (100 * near_hit // near_total) if near_total else 0
     print(f"functions:   {len(funcs)}  (was {n_detected} detected; "
-          f"+{len(funcs) - n_detected} via far-call closure)")
+          f"+{len(funcs) - n_detected} via segment-aware closure)")
     print(f"lifted ok {n_ok}, failed {n_fail}")
     print(f"instructions:{n_insns}")
     print(f"chunks:      {len(chunks)}  ({CHUNK} funcs each) in {OUT}")
+    print(f"near calls:  {near_total}  resolved to a real start: {near_hit} "
+          f"({near_pct}%)")
     print(f"referenced:  {len(referenced)}  undefined->stubbed {len(stubs)}")
     print(f"soft gaps:   {n_unhandled} (UNHANDLED / needs-dispatch markers)")
 

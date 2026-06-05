@@ -87,18 +87,19 @@ puzzle layouts. Reversing those formats happens in parallel (see
 - 🔨 **Lifting (Phase 3):** the game is mechanically lifted to C
   ([`tools/lift_bolo.py`](tools/lift_bolo.py) → `src/recomp/gen/`) against the
   `recomp16` runtime, with a build skeleton (`CMakeLists.txt`, `src/main.c`).
-  Far-call closure expands coverage to **225 functions** and confirms the QB
-  runtime itself is lifted from the image (only 10 far targets unresolved).
-  Remaining gaps are quantified and documented: x87 FPU escapes, indirect-dispatch
-  sites, and segment-aware near-call resolution. Compiling needs MSVC + SDL2 (not
-  wired in this environment yet).
+  Segment-aware discovery resolves the call graph: **932 functions, 56.8K
+  instructions, 70K lines of C**, with **99% of near calls resolved to real
+  function starts** and only 14 stubs left (all out-of-image BIOS/absolute
+  targets). The program entry is lifted. Remaining gaps are the classic hard
+  parts: x87 FPU translation and indirect-dispatch wiring. Compiling needs
+  MSVC + SDL2 (not available in this environment yet).
 
 | Phase | What | State |
 |------:|------|-------|
 | 0 | Reconnaissance | ✅ [`docs/RECON.md`](docs/RECON.md) |
 | 1 | Unpack PKLITE + disassemble | ✅ |
 | 2 | Classify QB runtime vs game logic | ✅ [`docs/CLASSIFY.md`](docs/CLASSIFY.md) |
-| 3 | Lift 8086 → C | 🔨 in progress — 182 funcs / 41.6K lines generated |
+| 3 | Lift 8086 → C | 🔨 in progress — 932 funcs / 70K lines, call graph resolved |
 | 4 | Shim EGA/DOS → SDL2 | ⬜ |
 | 5 | Build & debug to playable | ⬜ |
 | 6 | Ship native + extras | ⬜ |

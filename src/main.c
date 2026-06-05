@@ -5,12 +5,12 @@
  * offsets, matching the lifted call graph), seeds the CPU registers from the
  * PKLITE register footer, and dispatches to the program entry.
  *
- * STATUS (Phase 3): the lifted set currently covers the 182 analyzer-detected
- * functions. The QuickBASIC/CRT startup at CS:IP=2011:0010 (image 0x20120) and
- * the ~590 referenced runtime entry points are not yet lifted (they link as
- * stubs in recomp_stubs.c). Bring-up therefore stops at the first stub; the
- * next step is to expand the function set to all call targets and lift the
- * runtime from the image. See docs/PLAN.md Phase 3.
+ * STATUS (Phase 3): segment-aware discovery lifts 932 functions (the whole
+ * in-image call graph, including the QuickBASIC/CRT startup at CS:IP=2011:0010
+ * / image 0x20120 dispatched below). Only 14 out-of-image far targets remain
+ * stubbed. Bring-up now runs the startup until it reaches an unhandled x87 FPU
+ * op or an indirect-dispatch site (both still emitted as comments) -- those are
+ * the next gaps to close. See docs/PLAN.md Phase 3.
  */
 #include <stdio.h>
 #include <stdlib.h>
