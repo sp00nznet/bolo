@@ -19,14 +19,30 @@ First bytes:
 OV0: 0A 05 01 01 00 00 00 00 7F 02 63 00 2C 01 2C 01  3B 3E 3E 00 00 AA 00 AA ...
 OV1: 0A 05 01 01 00 00 00 00 7F 02 5D 01 2C 01 2C 01  00 00 00 00 00 AA 00 AA ...
 ```
-- Shared 16-byte-ish header (`0A 05 01 01`, then a `7F 02` field, then `2C 01 2C 01`
-  = 0x012C = 300 twice — likely width/height or a coordinate pair).
-- Body is dominated by the planar EGA pattern `00 AA 00 AA AA AA ...` — classic
-  4-plane 16-color EGA bitmap / color data. OV1 is the big one (42 KB) → probably
-  the main sprite/tile sheet; OV0 (19 KB) a secondary set.
-- **TODO:** find the loader (cross-ref the `"BOLO3.OV0"` / `"BOLO3.OV1"` strings in
-  the unpacked exe) to confirm dimensions, plane order, and whether it's raw EGA
-  planes or a simple RLE.
+Header (16 bytes), as decoded words:
+```
+OV0: 050A 0101 0000 0000 | 027F 0063 012C 012C   (then pixel data)
+OV1: 050A 0101 0000 0000 | 027F 015D 012C 012C
+```
+**Verified:** word4 = `0x027F` = **639** and OV1 word5 = `0x015D` = **349** → these
+are `xmax,ymax` for **`SCREEN 9` (EGA 640×350×16, 4 bitplanes)**. OV0's word5 =
+`0x63` = 99 → a 640×100 band. `0x050A 0101` is a signature/version; `012C 012C` =
+300,300 (a default coord pair?).
+
+**Compression confirmed, codec not yet:** a full 640×350 SCREEN 9 planar image is
+640/8·350·4 = **112,000 bytes**, but OV1 is only **42,104** (~2.66:1), so the body
+is *compressed*, not raw planes. Tested and ruled out:
+- raw 4-plane planar (row-interleaved and plane-sequential) → renders as noise;
+- simple `(count,value)` / `(value,count)` RLE → expands to ~200 KB, not 112 KB.
+
+So it's a **custom Soleau/QB codec** (likely a plane-aware or marker-based RLE).
+OV2 starts with a `0xFD` run — possibly a QB `BSAVE` image (magic `0xFD`) for the
+title screen, a different container than OV0/OV1.
+
+**Next:** trace the loader in the lifted code (the routine that opens `BOLO3.OV1`
+and writes EGA video memory / calls the QB graphics runtime) to recover the exact
+decode, then round-trip-validate by rendering to PNG. Decode harness already
+stubbed in `work/` (see git history of this file).
 
 ## `BOLO3.OV2` — image / level art
 
