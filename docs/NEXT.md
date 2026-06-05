@@ -21,7 +21,45 @@ python tools/lift_bolo.py
 - Call graph essentially fully resolved: near calls 99% to real starts, only **14
   stubs** (all out-of-image BIOS/absolute far targets — fine to leave).
 - Program entry `res_020120` is lifted and in the dispatch table.
-- Build skeleton ready (`CMakeLists.txt`, `src/main.c`, `src/runtime/` = recomp16).
+- **IT BUILDS AND RUNS.** `bash scripts/build.sh` → `build/bolo.exe` (mingw64
+  gcc + SDL2). It loads the image, calls the entry, and executes real lifted
+  startup code (segment setup + `rep movsb` self-relocation) before returning.
+
+## The active frontier (Phase 5 debugging) — two coupled problems
+
+Traced from the entry `res_020120` (which runs cleanly today):
+```
+mov ax,es ; add ax,0x10     ; ax = load-module seg = PSP+0x10
+push cs ; pop ds            ; DS = CS  (so ds:[..] reads CODE-segment data)
+mov ds:[4],ax ; add ax,ds:[0xC] ; ds:[0xC] is real image data -> end-of-prog seg
+mov cx,ds:[6] ; ... rep movsb (std, downward)   ; self-relocate the program
+push ax ; push 0x34 ; retf  ; computed far jump to relocated_seg:0x0034
+```
+
+1. **Load base / PSP seeding.** The original load module starts at PSP:0x100 (the
+   decompressor wrote output at `DI=0x100`). So load the image at linear **0x100**
+   (not 0), set `ES=DS=PSP` (e.g. segment 0) and `ax`/regs so `PSP+0x10` is the
+   load-module segment, set `CS = 0x10 + 0x2011`, `SS = 0x10 + 0x2348`, `SP=0x80`,
+   and fill a minimal PSP (top-of-memory paras at `PSP:[0x02]`). Then the startup's
+   `es+0x10` and `ds:[0xC]/[6]` reads line up and the relocation math is sane.
+   (NOTE: an earlier draft wrongly said "no PSP -> garbage"; because `DS=CS`, the
+   `ds:[..]` reads are code-segment data and are valid — the real miss is the
+   0x100 load base + `ES=PSP` seeding.)
+2. **Computed control flow + self-relocation.** The startup physically moves the
+   program (`rep movsb`) and `retf`-trampolines to the *moved copy* — but our
+   lifted functions are static C at original image offsets, so the moved copy has
+   no code to run. Two viable fixes:
+   - **Dispatch with relocation delta:** add `recomp_dispatch(cpu,seg,off)` (binary-
+     search `g_dispatch`, map `seg*16+off - reloc_base` → image offset) and emit it
+     for indirect `call`/`jmp` and for `retf`-when-the-target-resolves. The
+     relocation is a constant paragraph shift, so the delta is a single constant.
+   - **Bypass the relocation:** skip the self-move and jump straight to the post-
+     relocation QB entry (the runtime init + user main), mapped back to its original
+     image offset. Often the pragmatic choice for self-relocating CRT startups.
+
+These are coupled: fix the 0x100 load base + PSP seeding first (quick, in
+`main.c`), then make `retf`/indirect transfers dispatch — each change is now
+testable in the build/run loop (`scripts/build.sh` + run).
 
 ## Next moves (in order)
 
