@@ -68,13 +68,24 @@ puzzle layouts. Reversing those formats happens in parallel (see
 
 ## Status
 
-🚧 **Early days — Phase 1 (unpack & disassemble).**
+🚧 **Phase 1 done — the patient is unpacked and on the table.**
+
+- ✅ **Unpacked the PKLITE compression ourselves.** BOLO3.EXE uses PKLITE 1.15 in
+  its trickiest *large + extra* mode with a *self-decrypting* stub. We reverse-
+  engineered the stub, wrote a byte-exact static decompressor
+  ([`tools/unpklite.py`](tools/unpklite.py) — a new reusable toolkit tool), and
+  recovered the full **136 KB** load image. No emulator required.
+- ✅ **Analyzed:** 182 functions, ~35K instructions, 833 strings.
+- ⭐ **Identified the language: compiled Microsoft QuickBASIC 4.5.** The runtime
+  error-message table (`RETURN without GOSUB`, `CASE ELSE expected`, …) gives it
+  away. That means much of the binary is the *known* QB runtime, and the graphics
+  are BASIC `SCREEN 9` EGA `PUT`/`GET` sprites — a big head start on the rest.
 
 | Phase | What | State |
 |------:|------|-------|
-| 0 | Reconnaissance | ✅ done — [`docs/RECON.md`](docs/RECON.md) |
-| 1 | Unpack PKLITE + disassemble | 🔨 in progress |
-| 2 | Classify CRT vs game logic | ⬜ |
+| 0 | Reconnaissance | ✅ [`docs/RECON.md`](docs/RECON.md) |
+| 1 | Unpack PKLITE + disassemble | ✅ |
+| 2 | Classify QB runtime vs game logic | 🔨 next |
 | 3 | Lift 8086 → C | ⬜ |
 | 4 | Shim EGA/DOS → SDL2 | ⬜ |
 | 5 | Build & debug to playable | ⬜ |

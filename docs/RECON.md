@@ -68,6 +68,39 @@ with our own PKLITE decompressor (`tools/unpklite.py`).
   16-bit DOS, MSC 5.x).
 - `gh` (authed), `git`.
 
+## Phase 1a/1b/1c results (unpacked & analyzed)
+
+**Unpacked** with our own `tools/unpklite.py` (no DOSBox needed):
+- The PKLITE stub is **self-decrypting** (rolling-XOR loop at IP 0x13E unpacks the
+  real decompressor in place). We emulated that to read the true decompressor and
+  nail the bit engine, then auto-locate the compressed stream (file **0x31E**).
+- Decode: 41,289 literals + 17,382 matches → **136,151-byte** load image,
+  terminating 10 bytes from EOF (reloc table + register footer).
+- Real entry **CS:IP = 2011:0010**, **SS:SP = 2348:0080**. Large segment values
+  ⇒ multi-segment large-model program (lots of far calls). Verified by readable
+  strings (`BOLO3.OV0`, `Soleau`, `Mr. Bolo`) and `55 8B EC` prologues.
+
+**Analyzed** (`analyze.py` on the rebuilt MZ): **182 functions, 35,076
+instructions, 833 strings**; symbol table at `work/bolo3.toml`.
+
+### Language: compiled Microsoft QuickBASIC 4.5  ⭐
+
+The string table is full of the **QuickBASIC runtime error messages**
+(`RETURN without GOSUB`, `Out of DATA`, `CASE ELSE expected`, `RESUME without
+error`, `FIELD statement active`, `Redo from start`, `Bytes free`, …) plus
+linked-routine tags like `bmGETFONT`, `blSTRIP`, `blEWINDC`. Bolo3 was written in
+**QuickBASIC and compiled with BCOM45 statically linked** (self-contained, no
+BRUN needed). Implications:
+
+- A large share of the 182 functions is the **documented QB runtime** (string/
+  array/file/graphics `B$…` helpers) — prime classification targets we don't have
+  to reverse from scratch.
+- Graphics are almost certainly BASIC **`SCREEN 9` (EGA 640×350×16)** with
+  **`PUT`/`GET`** sprite arrays — which explains the `.OVx` graphics blobs.
+
+Extra asset references found in the image: `BOLO3.SCR` (title screen?), `T1.JFT`
+(per-puzzle table?), and the trio `BOLO3.OV3 BOLO3.OV4 BOLO3.JFT` loaded together.
+
 ## Closest prior art
 
 **civ** (Sid Meier's Civilization, 1991) — same era, same format (16-bit MZ),

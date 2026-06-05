@@ -28,24 +28,33 @@ save states, new puzzles).
 ### Phase 0 — Reconnaissance ✅
 See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
 
-### Phase 1 — Unpack & disassemble  ⬅ current
-- [ ] **1a. PKLITE decompression** (`tools/unpklite.py`). Static unpacker → clean
-      `work/BOLO3_unpacked.exe` (real MZ, real entry point, relocations applied).
-      Verify: readable strings (filenames `BOLO3.OV0`, menu text), sane MZ header,
-      entry lands on a real prologue.
-- [ ] **1b. Decode** resident code with `decode16.py --resident`.
-- [ ] **1c. Analyze** function boundaries / call graph / strings with `analyze.py`,
-      export a symbol table (`work/bolo3.toml`).
-- [ ] Identify the compiler/runtime (MSC vs Turbo C) from prologues & CRT strings
-      to know which functions are library boilerplate we can shortcut.
+### Phase 1 — Unpack & disassemble  ✅
+- [x] **1a. PKLITE decompression** (`tools/unpklite.py`). Static unpacker — wrote
+      a byte-exact decompressor for the v1.15 **large+extra** variant by emulating
+      the self-decrypting stub. Auto-locates the stream (file 0x31E) → 136,151-byte
+      image. Verified by strings + `55 8B EC` prologues. Emits `work/BOLO3_image.bin`
+      and a rebuilt MZ `work/BOLO3_unpacked.exe`. Entry CS:IP=2011:0010.
+- [x] **1b. Decode** resident code (capstone 16-bit; integrated via analyze).
+- [x] **1c. Analyze** → **182 functions, 35,076 insns, 833 strings**; symbol table
+      `work/bolo3.toml`.
+- [x] **Compiler identified: Microsoft QuickBASIC 4.5 (BCOM45 statically linked)** —
+      from the QB runtime error-string table. (See RECON.md.)
+- [ ] **1d. Relocations.** Reconstruct the large-model reloc table + apply, so the
+      MZ is fully runnable and the lifter can tell segment-reference words from
+      data. (Deferred — not needed for analysis; see FORMATS.md / unpklite TODO.)
 
-### Phase 2 — Classification
-- [ ] Separate C runtime / library code from Bolo game logic.
+### Phase 2 — Classification  ⬅ current
+- [ ] **Fingerprint the QuickBASIC runtime.** Identify the `B$…` runtime routines
+      (string/array/file/error/graphics helpers) among the 182 functions using the
+      QB45 runtime as the reference — these are library code we don't reverse.
+      This is the analogue of SDK-classification in larger projects and should
+      account for a big fraction of the functions.
+- [ ] Isolate the **actual Bolo game logic** (the BASIC program compiled to x86):
+      main menu, puzzle loader, move/animation engine, laser/collision rules,
+      renderer (`PUT`/`GET`), `.OVx`/`.JFT`/`.SCR` file I/O.
 - [ ] Map the interrupt/BIOS surface actually used (INT 10h video, INT 16h kbd,
-      INT 21h DOS file I/O, INT 33h mouse?, PIT/PC-speaker for sound). This is the
-      exact shim TODO list — likely small for a game this size.
-- [ ] Name the obvious entry points: main menu, puzzle loader, move/animation
-      engine, collision/laser logic, renderer, file I/O for `.OVx`/`.JFT`.
+      INT 21h file I/O, PIT/PC-speaker for sound). The QB runtime mediates most of
+      this, so the shim list is "implement the QB runtime entry points we hit."
 
 ### Phase 3 — Lifting
 - [ ] `lift16.py` over the symbol table → C in `src/recomp/gen/`.

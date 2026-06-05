@@ -4,6 +4,14 @@ The files next to `BOLO3.EXE` carry `.OV*` extensions but are **data, not code
 overlays**. This is the working log of reversing them. Everything here is
 provisional until cross-referenced against the loader code in the unpacked exe.
 
+> **Big hint (Phase 1):** the game is compiled **QuickBASIC 4.5**. So the graphics
+> blobs are very likely **`GET`/`PUT` sprite arrays** (and/or `BSAVE` images) for
+> **`SCREEN 9`** (EGA 640×350×16). A QB `GET` array begins with a small header
+> encoding the sprite's bit-width and pixel-height; the planar `00 AA …` bodies in
+> OV0/OV1 are consistent with 4-plane EGA `PUT` data. The `.JFT` is plausibly a
+> bitmap **font** table (the `GETFONT` routine tag supports this) and/or the puzzle
+> grids. Reverse against the QB runtime's `B$PUT`/`B$GET`/`B$BLOAD` call sites.
+
 ## `BOLO3.OV0` / `BOLO3.OV1` — EGA graphics (sprites/tiles)
 
 First bytes:
