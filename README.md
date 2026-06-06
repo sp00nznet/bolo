@@ -101,7 +101,7 @@ puzzle layouts. Reversing those formats happens in parallel (see
 | 2 | Classify QB runtime vs game logic | ✅ [`docs/CLASSIFY.md`](docs/CLASSIFY.md) |
 | 3 | Lift 8086 → C | ✅ 932 funcs / 70K lines, call graph resolved |
 | 4 | Shim EGA/DOS → SDL2 | ✅ recomp16 runtime wired |
-| 5 | Build & debug to playable | 🔨 **builds + runs**; executing lifted startup |
+| 5 | Build & debug to playable | 🔨 **boots & runs the game** (600+ funcs, no crash) |
 | 6 | Ship native + extras | ⬜ |
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap and milestones.
@@ -117,19 +117,28 @@ bolo/
   src/          Recompiled + hand-written runtime code (later phases)
 ```
 
-## Building
+## Building & running
 
-It builds! With MSYS2 mingw64 (gcc + SDL2):
+It builds **and boots the game**. With MSYS2 mingw64 (gcc + SDL2):
 
 ```bash
-bash scripts/build.sh                      # -> build/bolo.exe (native, 2 MB)
-SDL_VIDEODRIVER=dummy ./build/bolo.exe work/BOLO3_image.bin
+# 1. produce the post-startup snapshot (PKLITE + QB startup, run in an emulator)
+python tools/uni_original.py
+# 2. lift the decompressed program from the snapshot
+python tools/lift_bolo.py
+# 3. build, then relink with a large stack
+bash scripts/build.sh && \
+  gcc build/obj/*.o -o build/bolo.exe $(pkg-config --libs sdl2) -Wl,--stack,0x8000000
+# 4. run
+./build/bolo.exe          # boots & runs the real QB game code
 ```
 
-Regenerate the lifted C first if needed (see `docs/NEXT.md`). The recompiled
-binary currently boots and executes the original QuickBASIC startup (segment
-setup + self-relocation) before reaching the first computed-jump trampoline —
-the active debugging frontier (see `docs/PLAN.md` Phase 5).
+The native binary loads a faithful post-startup memory snapshot (the QuickBASIC
+self-relocating/decompressing startup is run once in a Unicorn-based harness,
+`tools/uni_original.py`) and dispatches the real program entry. It executes 600+
+functions of the QB runtime + game init and reaches the game's input loop. What's
+left for a *visible* build is the EGA `SCREEN 9` planar video HAL + input event
+feeding — see `docs/NEXT.md`.
 
 ## Credits & legal
 

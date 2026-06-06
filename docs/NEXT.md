@@ -1,6 +1,29 @@
 # Runbook — where to pick up
 
-## ✅ MECHANICAL INTEGRATION DONE — native recomp runs real game code
+## ✅✅ THE NATIVE RECOMP BOOTS AND RUNS THE GAME
+
+`build/bolo.exe` loads the snapshot and executes the real QuickBASIC game:
+**600+ functions of the QB runtime + game init run with no crash**, and it settles
+into the game's input polling loop (`013B42/013B0C/019AD2`) — i.e. it has booted and
+is waiting for keyboard/timer input. Getting here took: snapshot lift + the
+`dos_init()` runtime init (sets `g_dos`/IVT/HAL/BIOS area) + two systematic lifter
+fixes (call-far/jmp-far dispatch, `_CODE_SEG` cs-relative). Build:
+`bash scripts/build.sh` then relink with `-Wl,--stack,0x8000000`.
+
+### Remaining for a *visible/playable* build (well-scoped Phase 4 I/O)
+1. **EGA planar video HAL.** `recomp16/hal/video.c` only does VGA mode-13h (linear
+   8bpp); Bolo uses `SCREEN 9` (EGA 640×350, 4 planes via ports 0x3C4/0x3CE).
+   Add plane-mask emulation + a 4-plane framebuffer, present as RGBA to SDL2.
+   (To verify offline: dump `cpu.mem[0xA0000..]` after init and decode the planes
+   to PNG.)
+2. **Feed input + timer events.** The game polls INT 16h (keyboard) / INT 1Ah
+   (timer); wire the SDL2 HAL event pump (recomp16 has a `poll_events` callback in
+   DosState) so key presses reach the game and it advances past the title/menu.
+3. **Asset file loads** already work via INT 21h AH=3D (game_dir="original").
+Then: title → menu → select puzzle → move Mr. Bolo. The hard parts (boot, lift,
+runtime, dispatch) are done; this is standard I/O-shim wiring.
+
+## (historical) MECHANICAL INTEGRATION — native recomp runs real game code
 
 The recomp now boots from the post-startup snapshot and executes the real
 decompressed QB program:
