@@ -98,13 +98,38 @@ static C and the data is already in place. Trying to run phases 1–3 faithfully
 fights an approximated DOS environment (the self-move trampoline currently lands
 on a copied `retf` and the stack region is BSS/zero, a dead end).
 
-**Therefore the bypass is now the clearly-better route:** skip phases 1–3 and jump
-straight to the post-startup QB entry — the runtime init + user `main` — with
-`DS = DGROUP` (the data segment) set up by hand. To find that entry, follow the
-phase-3 tail: after relocation it `retf`/calls into the runtime; that target (mapped
-to its image offset) is the bypass entry. Set `cpu.ds`/`cpu.es` to the DGROUP
-paragraph and `recomp_dispatch` to it. The dispatch infrastructure (src/icall.c)
-and the build/run/trace loop are ready for this.
+**The handoff (fully disassembled).** Phase 3's relocation loop (CS:0xAE–0xE0)
+walks a segment-grouped reloc table and ends with:
+```
+CS:00E2 mov ax,bx          ; bx = load base ([4])
+CS:00E4 mov di,[8]         ; init SP   = 0x0012
+CS:00E8 mov si,[0xA] ; add si,ax        ; init SS  = 0x2608 + base
+CS:00F2 sub ax,0x10 ; mov ds,ax ; mov es,ax   ; DS=ES = PSP
+CS:00FC cli ; mov ss,si ; mov sp,di ; sti
+CS:0104 ljmp cs:[0]        ; FAR JUMP through the header pointer = real entry
+```
+Header (CS:0): `[0..3]` far entry ptr, `[4]` base, `[6]` move count, `[8]` SP,
+`[0xA]` SS, `[0xC]` size, then the **relocation table at CS:0x132 (image 0x20242)**.
+
+**Open puzzle / the real prerequisite.** The header entry pointer reads
+`0xB409:0x44FF` → image 0xB858F, far beyond the 0x213D7 image. So it is a
+*pre-relocation* value; resolving it (and every far pointer the game loads from
+data) requires **applying the QB relocation table** with the correct base. That is
+the deferred Phase 1d (reconstruct & apply relocations) — and it turns out to be
+the actual gate to booting, not env tweaks or a naive bypass.
+
+**Concrete next step:** implement the reloc walker (mirror CS:0xAE–0xE0) over the
+table at image 0x20242 to (a) resolve the real entry pointer and (b) decide the
+base so segment words land in our image-relative dispatch space (likely base 0 so
+they stay image offsets). Then dispatch to the resolved entry. The reloc format is
+decoded above; src/icall.c + the build/run/trace loop are ready.
+
+NOTE: a naive linear walk of the table from offset 0x132 overruns the image, so
+the table base/encoding needs verifying against the asm semantics exactly
+(`cx=word; if 0 {dx+=0x1000}; es=dx+bx; repeat cx: di=word; es:[di]+=bx`, with
+`di==0xFFFF` the >64K span marker). Get the walker matching the asm on a small
+prefix first, then apply with the chosen base. This is the deferred Phase 1d and
+is the single remaining gate to a booting program.
 
 ## Next moves (in order)
 
