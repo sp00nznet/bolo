@@ -202,6 +202,36 @@ startup documentation (or compare against a known QB4.5 EXE whose startup is
 documented) before more emulation — the emulator is correct; the *model of the
 startup's intent* is what's incomplete.
 
+### ★ ROOT CAUSE FOUND (confirmed in the Unicorn harness): missing PKLITE relocations
+
+The startup self-move corrupts only because **`unpklite.py` never applied PKLITE's
+relocations.** The startup reads `[C]` (CS:0x0C) and computes `top = LM + [C]`; the
+`std` move is correct only when `top > CS` (=LM+0x2011), i.e. when `[C] > 0x2011`.
+Our unpacked image has the *un-relocated* `[C]=0x1B22 < 0x2011`, so the move goes the
+wrong way and clobbers its own `push;retf`.
+
+**Proven empirically:** patching `[C]` to ≈ program size (0x2140) in the harness makes
+`top`(0x2160) > CS(0x2031); CS:0x2F survives intact (`50 b8`); and execution **takes
+the retf trampoline to a new segment (CS=0x8544)** — phase 1 completes. So `[C]` (and
+every other segment word) is a PKLITE relocation target: at real DOS load PKLITE adds
+the load segment (~0x1000+), pushing `[C]` above 0x2011.
+
+**THE FIX (now well-defined and validatable):**
+1. Reconstruct & apply PKLITE's relocation table in `unpklite.py` (the deferred Phase
+   1d). For large+extra mode the relocations are applied during/after decompression;
+   parse them and add a chosen load-segment to every listed word. (A naive trailing
+   table doesn't hold enough entries, so the reloc info is in the large-mode stream
+   structure — see the PKLITE format refs in git history.)
+2. Pick a non-zero load segment (real DOS uses ~0x1000+) so relocated `[C] > 0x2011`.
+3. Run `uni_startup.py` (load at that segment, relocations applied) → the startup will
+   move-up correctly, decompress (phase 2), relocate (phase 3), and `ljmp cs:[0]` to
+   the real entry. Read that entry; feed it to the recomp's `recomp_dispatch`.
+4. The recomp must then either use the relocated image + matching load base, or keep
+   image-relative dispatch and resolve the (now-known) real entry.
+
+This single missing pass — PKLITE relocation reconstruction — gates the entire boot.
+Everything else (lift, dispatch, runtime, build, emulator) is in place and verified.
+
 ### Automated emulation harness (`tools/uni_startup.py`) — built & exhaustively run
 
 Rigged up a **fully scriptable Unicorn-Engine harness** (pip `unicorn`, no DOSBox
