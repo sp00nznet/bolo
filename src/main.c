@@ -60,6 +60,11 @@ int main(int argc, char **argv)
     cpu.cs = SNAP_CS; cpu.ds = SNAP_DS; cpu.es = SNAP_ES; cpu.ss = SNAP_SS;
     cpu.ip = SNAP_IP;
 
+    /* initialize the recomp16 DOS/BIOS runtime (sets g_dos, IVT, HAL, BIOS data
+     * area). Without this, INT 21h handlers deref a NULL g_dos. */
+    static DosState dos;
+    dos_init(&dos, &cpu, "original");
+
     fprintf(stderr, "dispatching real entry %04X:%04X (image 0x%05lX)\n",
             SNAP_ENTRY_SEG, SNAP_ENTRY_OFF,
             (unsigned long)SNAP_ENTRY_SEG * 16 + SNAP_ENTRY_OFF - SNAP_LOAD_BASE);
