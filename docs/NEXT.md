@@ -187,6 +187,21 @@ from the MZ `min_alloc` / a 640 KB top), so CS wraps correctly; (3) run phases 1
 and read the resolved entry from the final `ljmp cs:[0]`. The interpreter already
 supports the needed opcodes; only the memory model + load segment need fixing.
 
+**HONEST CAVEAT (don't chase the wraparound naively).** `LM=0xE000` is not a real
+DOS load for a 136 KB program — it would straddle the 1 MB boundary. Yet under
+*every* realistic low/normal load, the `std` self-move with CX=0xC600 (> the
+0x4EF0 src/dst gap) overwrites its own `push;retf` continuation (CS:0x2F–0x34)
+before reaching it, which cannot be how the real (working) program behaves. So
+there is still a genuine misunderstanding of the QB BCOM startup or of the image
+layout — likely candidates: (a) the entry CS/footer or PKLITE relocations need
+applying first so the segment math differs; (b) the move count/`[C]`/`[6]` header
+fields mean something other than a flat byte-count/program-size; (c) the move is
+into a region that does not overlap because the program is loaded with a different
+base than assumed. **Recommended:** find QuickBASIC 4.5 / BC.EXE compiled-EXE
+startup documentation (or compare against a known QB4.5 EXE whose startup is
+documented) before more emulation — the emulator is correct; the *model of the
+startup's intent* is what's incomplete.
+
 ## Next moves (in order)
 
 ### 1. Get a first build  *(needs MSVC + SDL2 — not present in the dev env used so far)*
