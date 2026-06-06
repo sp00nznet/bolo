@@ -202,6 +202,36 @@ startup documentation (or compare against a known QB4.5 EXE whose startup is
 documented) before more emulation — the emulator is correct; the *model of the
 startup's intent* is what's incomplete.
 
+### QB4.5 startup investigation (results)
+
+Dug into it: there is **no public assembly-level spec** of the QB4.5 compiled-EXE
+startup — only the binary `BCOM45.LIB` (whose `__astart`/`B$START` module *is* the
+exact code already in our image, so disassembling it adds nothing). Re-verified
+facts: the entry **is** at image 0x20120 (CS=0x2011, startup at the image end;
+image 0x120 is game code, not the startup — so the footer parse is correct).
+
+The contradiction, stated cleanly: the `std` self-move is non-corrupting only when
+`top` (=LM+0x1B22) is **above** CS (=LM+0x2011), i.e. only when CS **wraps past
+0x10000** — which needs the program loaded at segment ≈0xE000. A 136 KB program
+can't load that high in 640 KB. So under any normal DOS load the move stomps its
+own `push;retf`. Since the real game works, a premise is still wrong, and it's not
+resolvable from first principles or the public web.
+
+**Two concrete ways to settle it (pick one):**
+1. **Observe the original in an emulator with a debugger** (DOSBox-X `debug`, or
+   PCjs). Break at the EXE entry, single-step the self-move, and read the *actual*
+   ES/DS/CX/SI/DI and the post-move CS:IP. That directly reveals the real load
+   segment + the move's true source/dest, settling the wraparound question. (No
+   DOSBox is installed in this environment — this needs one.)
+2. **Apply PKLITE relocations first.** We deferred reconstructing PKLITE's own
+   reloc table; the unpacked image's segment words may still be load-relative in a
+   way that changes the startup's arithmetic. Reconstruct + apply them (or unpack
+   with a reference tool like `deark`/`mz-explode` that also emits relocations) and
+   re-check CS/[C]/the move. This is cheap to try and may be the missing premise.
+
+The startup emulator (`tools/emulate_startup.py`) is ready to validate whichever
+answer these produce.
+
 ## Next moves (in order)
 
 ### 1. Get a first build  *(needs MSVC + SDL2 — not present in the dev env used so far)*
