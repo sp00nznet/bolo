@@ -124,12 +124,42 @@ base so segment words land in our image-relative dispatch space (likely base 0 s
 they stay image offsets). Then dispatch to the resolved entry. The reloc format is
 decoded above; src/icall.c + the build/run/trace loop are ready.
 
-NOTE: a naive linear walk of the table from offset 0x132 overruns the image, so
-the table base/encoding needs verifying against the asm semantics exactly
-(`cx=word; if 0 {dx+=0x1000}; es=dx+bx; repeat cx: di=word; es:[di]+=bx`, with
-`di==0xFFFF` the >64K span marker). Get the walker matching the asm on a small
-prefix first, then apply with the chosen base. This is the deferred Phase 1d and
-is the single remaining gate to a booting program.
+### Focused-run finding: the reloc table is PACKED (only exists post phase-2)
+
+A static walk of the table at 0x20242 fails because that region is still
+compressed. Entropy of `work/BOLO3_image.bin`:
+
+| region | entropy | meaning |
+|--------|--------:|---------|
+| code @0xF000 | 6.52 | real 8086 code (lifted fine) |
+| strings @0x1D000 | 5.62 | readable text |
+| **tail @0x20242** | **7.30** | **compressed** (the "reloc table" area) |
+| **end @0x21000** | **7.21** | **compressed** |
+
+The header entry pointer `CS:[0] = 0xB409:0x44FF` → image 0xB858F is *far beyond*
+the 136 KB image: it's a pre-decompression placeholder. So the **relocation table
+and the real entry pointer only materialize after the startup's phase-2 byte-LZ
+decompressor runs.** A standalone reloc walker therefore cannot work.
+
+### Corrected path to boot: emulate the startup loader (phases 1–3)
+
+Write a small faithful emulator of the startup (the exact disasm is in this file:
+self-move → byte-LZ decompress → relocation apply → `ljmp cs:[0]`) operating on a
+DOS-style memory image (load module + zeroed BSS for `min_alloc`). Run it once,
+offline, to produce: (a) the fully-decompressed/relocated memory, (b) the resolved
+real entry CS:IP. Then the recomp loads that final memory and `recomp_dispatch`es
+to the resolved entry (map it to its image offset). Instruction set to support is
+small: mov/add/sub/cmp/and/or/not/shr/shl, push/pop, lodsw/stosw, rep movsb/stosb,
+repe scasb, jcxz/loop/jmp/jcc, std/cld/cli/sti, retf, ljmp.
+
+Phase-2 decompressor (CS:0x35–0xA0) to transcribe: find 0xFF via `repe scasb`,
+then loop: `dl=ctrl byte; cx=count word; al=dl & 0xFE`; `al==0xB0` → `rep stosb`
+(run-fill of one literal byte); `al==0xB2` → `rep movsb` (copy); `dl & 1` ends the
+stream. This expands the packed tail into the reloc table + final DGROUP + the real
+entry pointer.
+
+This (Phase 1d, now correctly understood) is the single remaining gate to booting.
+Everything else — lift, dispatch, runtime, build — is in place.
 
 ## Next moves (in order)
 
