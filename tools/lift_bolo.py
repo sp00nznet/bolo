@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(TOOLS, "tools", "disasm"))
 sys.path.insert(0, os.path.join(TOOLS, "tools", "lift"))
 from decode16 import Decoder            # noqa: E402
 from lift16 import Lifter               # noqa: E402
+import lift16                           # noqa: E402  (to set _CODE_SEG per function)
 
 # We lift from the post-startup SNAPSHOT (the fully PKLITE+QB-decompressed and
 # relocated runtime memory captured by tools/uni_original.py), NOT the static
@@ -182,6 +183,7 @@ def main():
     referenced = set()
     n_ok = n_fail = n_insns = n_unhandled = 0
     near_total = near_hit = 0           # near-call resolution quality metric
+    segs_used = set()                   # code segments (for SEG_xxxx #defines)
 
     for name, start, end, far in funcs:
         try:
@@ -198,7 +200,14 @@ def main():
                         near_total += 1
                         if t in start_set:
                             near_hit += 1
+            segs_used.add(sb)
+            lift16._CODE_SEG = f"{sb:04X}"      # cs-relative reads use this constant
             c = lifter.lift_function(name, insns, start, is_far=far)
+            # inject entry trace + set cpu->cs to this function's segment (for
+            # `push cs`/`mov ax,cs` and to keep cs consistent after far calls)
+            c = c.replace("(CPU *cpu)\n{",
+                          f"(CPU *cpu)\n{{\n    recomp_enter(0x{start:06X}UL); "
+                          f"cpu->cs = SEG_{sb:04X};", 1)
             n_insns += len(insns)
             n_unhandled += c.count("UNHANDLED") + c.count("needs dispatch")
             referenced |= lifter.func_calls | lifter.ovl_calls
@@ -226,7 +235,10 @@ def main():
                 '#include "cpu.h"\n#include "dos_compat.h"\n\n'
                 "/* computed-transfer dispatcher (retf trampolines, indirect "
                 "call/jmp) */\nvoid recomp_dispatch(CPU *cpu, uint16_t seg, "
-                "uint16_t off);\n\n")
+                "uint16_t off);\nvoid recomp_enter(unsigned long addr);\n\n")
+        for s in sorted(segs_used):
+            f.write(f"#define SEG_{s:04X} 0x{s:04X}\n")
+        f.write("\n")
         for n in sorted(defined) + stubs:
             f.write(f"void {n}(CPU *cpu);\n")
         f.write("\n#endif\n")

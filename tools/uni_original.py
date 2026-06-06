@@ -83,6 +83,13 @@ def main():
     NMAX = 30_000_000
     QB_ENTRY = (LOAD_SEG + 0x2011)      # the QB startup segment (post-PKLITE)
 
+    ENTER_TRACE = "--enter-trace" in sys.argv
+    starts = set()
+    if ENTER_TRACE:
+        import re as _re
+        for m in _re.finditer(r"0x([0-9A-Fa-f]+)UL", open("src/recomp/gen/recomp_dispatch.c").read()):
+            starts.add(int(m.group(1), 16))
+
     def hook_code(uc, address, size, _):
         st["n"] += 1
         cs = uc.reg_read(UC_X86_REG_CS)
@@ -106,11 +113,20 @@ def main():
             print(f"\n*** QB ljmp cs:[bx] at {cs:04x}: target {seg:04x}:{off:04x} "
                   f"linear {(seg<<4)+off:#07x}")
             st["qb_entry"] = (seg, off)
-        # snapshot the fully-processed memory + regs at the real entry
-        if "qb_entry" in st and cs == st["qb_entry"][0] and not st.get("dumped"):
-            st["dumped"] = True
-            dump_snapshot(uc, st["qb_entry"])
-            st["stop"] = "snapshot at real entry"; uc.emu_stop(); return
+        # at the real entry: either snapshot+stop, or begin function-entry tracing
+        if "qb_entry" in st and cs == st["qb_entry"][0] and not st.get("at_entry"):
+            st["at_entry"] = True
+            if not ENTER_TRACE:
+                dump_snapshot(uc, st["qb_entry"])
+                st["stop"] = "snapshot at real entry"; uc.emu_stop(); return
+            st["tracing"] = True; st["ecount"] = 0
+        if st.get("tracing"):
+            lin = (cs << 4) + uc.reg_read(UC_X86_REG_IP)
+            if lin in starts:
+                print(f"E {lin:06X}")
+                st["ecount"] += 1
+                if st["ecount"] >= 600:
+                    st["stop"] = "enter-trace done"; uc.emu_stop(); return
         if st["n"] > NMAX:
             uc.emu_stop()
 

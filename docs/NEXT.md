@@ -13,6 +13,29 @@ decompressed QB program:
   stack setup) → calls the QB runtime (`res_014670` @1283) + game modules.
 - Build: `bash scripts/build.sh` then relink with `-Wl,--stack,0x8000000`.
 
+### Differential debug vs harness — WORKING, two systematic lifter bugs fixed
+
+Method: both the recomp and `uni_original.py --enter-trace` emit a function-entry
+sequence (`E <imageoff>`); diff to find the first divergence. The recomp injects
+`recomp_enter()` at each function top (under BOLO_TRACE); main.c has a SIGSEGV
+handler + dispatch ring buffer + unbuffered stderr.
+
+Fixed so far (each advanced the boot):
+1. **`call far`/`jmp far` indirect (FF /3, FF /5)** were emitted as UNHANDLED no-ops
+   — decode16 names them `"call far"`/`"jmp far"`, not `"call"`/`"jmp"`. Added
+   dispatch handlers in lift16.py.
+2. **cs-relative accesses used stale `cpu->cs`** (not maintained across far calls).
+   Wired the lifter's `_CODE_SEG`: cs-relative reads + near-indirect dispatch now
+   use the function's constant segment (`SEG_xxxx`), and each function sets
+   `cpu->cs` at entry. (lift_bolo.py sets `_CODE_SEG` per function + emits the
+   `SEG_` defines.)
+
+Result: recomp now matches the harness **exactly through ~17 functions** — through
+the QB C-runtime entry and into the runtime's interrupt-vector install. Crash moved
+to `res_01ACDE` (the INT 21h AH=0x30/0x35/0x25 vector-install loop). Likely next
+causes: an INT 21h handler returning values that differ from the harness, or
+another unhandled instruction form. Continue the same diff loop.
+
 ### Current debug frontier (iterative)
 It runs the entry + into the QB runtime, then **crashes (SIGSEGV)** after 3 missed
 indirect calls to `1AB4:0000` (cs:0, uninitialized). A SIGSEGV handler in main.c

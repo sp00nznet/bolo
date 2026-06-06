@@ -40,6 +40,14 @@ static void (*lookup(unsigned long image_off))(CPU*)
     return NULL;
 }
 
+long g_enter_n = 0;
+void recomp_enter(unsigned long addr)
+{
+    if (g_trace && g_enter_n < 600)
+        fprintf(stderr, "E %06lX\n", addr);
+    g_enter_n++;
+}
+
 void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off)
 {
     unsigned long linear = (unsigned long)seg * 16 + off;

@@ -51,6 +51,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "loaded snapshot %ld bytes\n", n);
 
     signal(SIGSEGV, on_crash);
+    setvbuf(stderr, NULL, _IONBF, 0);   /* unbuffered so traces survive a crash */
     g_load_base = 0;     /* snapshot-lift keys functions by raw runtime linear */
     g_trace = getenv("BOLO_TRACE") ? 1 : 0;
 
