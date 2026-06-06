@@ -161,6 +161,32 @@ entry pointer.
 This (Phase 1d, now correctly understood) is the single remaining gate to booting.
 Everything else — lift, dispatch, runtime, build — is in place.
 
+### Startup emulator built (`tools/emulate_startup.py`) + the wraparound finding
+
+A focused 8086 interpreter (enough opcodes for the startup) now runs the loader on
+a DOS-style image. It correctly executes phase 1, and **pinpointed the real
+mechanism**: the self-move `rep movsb` (CX=0xC600 bytes, `std`/downward, src=CS,
+dst=`top`=LM+0x1B22) only works when `top` is **above** CS, but `top` is always
+0x4EF paragraphs **below** CS — *unless the program is loaded high enough that the
+CS segment wraps past 0x10000*. Verified:
+
+| load module seg | CS = LM+0x2011 | top = LM+0x1B22 | move-up (correct)? |
+|---|---|---|---|
+| 0x0010 | 0x2021 | 0x1B32 | no (corrupts) |
+| 0x1000 | 0x3011 | 0x2B22 | no |
+| **0xE000** | **0x0011** (wrapped) | **0xFB22** | **yes** |
+
+So Bolo uses the classic **QuickBASIC high-memory load with 8086 segment
+wraparound**: CS wraps around the 1 MB boundary. My flat low-load (LM=0x10) is why
+the move corrupted its own `push;retf` trampoline (CS:0x2F became `00 00`).
+
+**Next iteration on the emulator:** (1) give it a wraparound-faithful memory model
+(linear address `& 0xFFFFF`, and mirror the 64 KB overflow region so seg:off near
+1 MB wraps to 0); (2) load the image at the high LM DOS would actually use (compute
+from the MZ `min_alloc` / a 640 KB top), so CS wraps correctly; (3) run phases 1–3
+and read the resolved entry from the final `ljmp cs:[0]`. The interpreter already
+supports the needed opcodes; only the memory model + load segment need fixing.
+
 ## Next moves (in order)
 
 ### 1. Get a first build  *(needs MSVC + SDL2 — not present in the dev env used so far)*
