@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "cpu.h"
+#include <stdlib.h>
+#include "recomp/ega.h"
 
 typedef struct { unsigned long addr; void (*fn)(CPU*); } dispatch_t;
 extern const dispatch_t g_dispatch[];
@@ -40,12 +42,21 @@ static void (*lookup(unsigned long image_off))(CPU*)
     return NULL;
 }
 
+CPU *g_dbg_cpu = NULL;
 long g_enter_n = 0;
 void recomp_enter(unsigned long addr)
 {
-    if (g_trace && g_enter_n < 600)
+    if (g_trace && g_enter_n < 4000)
         fprintf(stderr, "E %06lX\n", addr);
     g_enter_n++;
+    if (g_enter_n == 3000000) {
+        ega_dump("work/ega_planes.bin");
+        if (g_dbg_cpu) {                        /* also dump text screen (B800) */
+            FILE *t = fopen("work/text.bin", "wb");
+            if (t) { fwrite(&g_dbg_cpu->mem[0xB8000], 1, 4000, t); fclose(t); }
+        }
+        _Exit(0);
+    }
 }
 
 void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off)

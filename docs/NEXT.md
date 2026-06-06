@@ -10,6 +10,29 @@ is waiting for keyboard/timer input. Getting here took: snapshot lift + the
 fixes (call-far/jmp-far dispatch, `_CODE_SEG` cs-relative). Build:
 `bash scripts/build.sh` then relink with `-Wl,--stack,0x8000000`.
 
+### EGA video HAL implemented (`src/recomp/ega.c`) — runs, not yet drawing
+
+Built a from-scratch EGA SCREEN 9 (640×350×16, 4-plane) HAL: plane memory with
+the Sequencer map-mask (3C4/3C5) + Graphics Controller (3CE/3CF: set/reset,
+enable-SR, rotate, read-map, mode, bit-mask), write modes 0/2 with EGA latches,
+`ega_set_mode`, and a planes→PNG dump (`tools/decode_ega.py`). Wired: A000 reads/
+writes route through it (cpu.h), EGA ports route via `port_out8`, and INT 10h now
+answers EGA detect (AH=12h/1Ah) + EGA mode-set (AL=0Dh/0Eh/10h/0Fh).
+
+**Current state:** the recomp runs 3M+ functions but draws **nothing** yet — 0 A000
+writes AND 0 B800 (text) writes at the input loop. So it's stuck in a *pre-render*
+path. Leading hypotheses (debug next):
+- The first thing after init is `INT 21h AH=3Fh` on stdin (handle 0). This is likely
+  a console/redirection check; recomp16's stdin read either blocks (no input) or, if
+  fed, makes the game think input is redirected — both wrong. Implement proper
+  console semantics for AH=3Fh/AH=0Bh on stdin so the game proceeds to draw.
+- Then menu input is probably via **INT 16h** (BIOS keyboard), which needs keys
+  pushed into recomp16's keyboard HAL (it currently returns no-key without an SDL
+  `poll_events`). Push keystrokes into the buffer so the menu advances.
+- Re-run the differential trace (recomp vs harness) once input is handled to catch
+  any remaining lifter divergence before the draw.
+The EGA HAL + screen-dump are ready to reveal the frame the moment the game draws.
+
 ### Remaining for a *visible/playable* build (well-scoped Phase 4 I/O)
 1. **EGA planar video HAL.** `recomp16/hal/video.c` only does VGA mode-13h (linear
    8bpp); Bolo uses `SCREEN 9` (EGA 640×350, 4 planes via ports 0x3C4/0x3CE).

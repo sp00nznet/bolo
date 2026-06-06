@@ -17,6 +17,7 @@
  */
 
 #include "recomp/dos_compat.h"
+#include "recomp/ega.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,6 +124,9 @@ void dos_init(DosState *ds, CPU *cpu, const char *game_dir)
 void dos_int21(CPU *cpu)
 {
     uint8_t ah = cpu->ah;
+
+    /* DEBUG: capture the EGA screen the first time the game blocks on a
+       stdin keyboard read (title/menu drawn, waiting for a key) */
 
     switch (ah) {
     case 0x00: /* Terminate program */
@@ -407,6 +411,11 @@ void dos_int21(CPU *cpu)
         cpu->flags &= ~FLAG_CF;  /* Always succeed */
         break;
 
+    case 0x44: /* IOCTL */
+        if (cpu->al == 0) cpu->dx = 0x80D3; /* char device (con) */
+        cpu->flags &= ~FLAG_CF;
+        break;
+
     case 0x4C: /* Terminate with return code */
         printf("[DOS] Program exit with code %d\n", cpu->al);
         cpu->halted = 1;
@@ -432,12 +441,27 @@ void dos_int21(CPU *cpu)
 void bios_int10(CPU *cpu)
 {
     switch (cpu->ah) {
+    case 0x12: /* EGA/VGA configuration / alternate select */
+        if (cpu->bl == 0x10) {        /* get EGA info -> report EGA present */
+            cpu->bh = 0x00;           /* color mode */
+            cpu->bl = 0x03;           /* 256K EGA memory */
+            cpu->cx = 0x0009;         /* feature/switch settings */
+        }
+        return;
+    case 0x1A: /* Get/set display combination code */
+        cpu->al = 0x1A;
+        cpu->bx = 0x0004;             /* BL=4: EGA w/ color display */
+        return;
     case 0x00: /* Set video mode */
         /* Store current mode in BIOS data area */
         mem_write8(cpu, 0x0040, 0x0049, cpu->al);
         if (cpu->al == 0x13) {
             /* Mode 13h: 320x200x256 - clear VGA framebuffer */
             memset(&cpu->mem[0xA0000], 0, 64000);
+        } else if (cpu->al == 0x0D || cpu->al == 0x0E || cpu->al == 0x10 ||
+                   cpu->al == 0x0F) {
+            /* EGA graphics modes (SCREEN 9 = mode 0x10, 640x350x16) */
+            ega_set_mode();
         } else if (cpu->al == 0x03) {
             /* Mode 3: 80x25 text - clear text mode buffer */
             memset(&cpu->mem[TEXT_MODE_BASE], 0, TEXT_COLS * TEXT_ROWS * 2);
@@ -638,6 +662,12 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t value)
     /* PIT timer ports */
     if (port == 0x40 || port == 0x43) {
         timer_port_write(&ds->timer, port, value);
+        return;
+    }
+
+    /* EGA Sequencer / Graphics Controller (SCREEN 9 planar) */
+    if (port == 0x3C4 || port == 0x3C5 || port == 0x3CE || port == 0x3CF) {
+        ega_port_write(port, value);
         return;
     }
 

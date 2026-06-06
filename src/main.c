@@ -64,6 +64,7 @@ int main(int argc, char **argv)
      * area). Without this, INT 21h handlers deref a NULL g_dos. */
     static DosState dos;
     dos_init(&dos, &cpu, "original");
+    extern CPU *g_dbg_cpu; g_dbg_cpu = &cpu;   /* for debug screen dumps */
 
     fprintf(stderr, "dispatching real entry %04X:%04X (image 0x%05lX)\n",
             SNAP_ENTRY_SEG, SNAP_ENTRY_OFF,

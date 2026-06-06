@@ -82,26 +82,43 @@ static inline uint32_t seg_off(uint16_t seg, uint16_t off)
     return ((uint32_t)seg << 4) + off;
 }
 
+/* ---------- EGA planar video memory (A000h) -- see ega.c ---------- */
+void    ega_write8(uint32_t off, uint8_t value);
+uint8_t ega_read8(uint32_t off);
+#define EGA_LO 0xA0000u
+#define EGA_HI 0xB0000u
+
 /* ---------- Memory access ---------- */
 static inline uint8_t mem_read8(CPU *cpu, uint16_t seg, uint16_t off)
 {
-    return cpu->mem[seg_off(seg, off)];
+    uint32_t a = seg_off(seg, off);
+    if (a >= EGA_LO && a < EGA_HI) return ega_read8(a - EGA_LO);
+    return cpu->mem[a];
 }
 
 static inline uint16_t mem_read16(CPU *cpu, uint16_t seg, uint16_t off)
 {
     uint32_t addr = seg_off(seg, off);
+    if (addr >= EGA_LO && addr < EGA_HI)
+        return ega_read8(addr - EGA_LO) | ((uint16_t)ega_read8(addr - EGA_LO + 1) << 8);
     return (uint16_t)cpu->mem[addr] | ((uint16_t)cpu->mem[addr + 1] << 8);
 }
 
 static inline void mem_write8(CPU *cpu, uint16_t seg, uint16_t off, uint8_t val)
 {
-    cpu->mem[seg_off(seg, off)] = val;
+    uint32_t a = seg_off(seg, off);
+    if (a >= EGA_LO && a < EGA_HI) { ega_write8(a - EGA_LO, val); return; }
+    cpu->mem[a] = val;
 }
 
 static inline void mem_write16(CPU *cpu, uint16_t seg, uint16_t off, uint16_t val)
 {
     uint32_t addr = seg_off(seg, off);
+    if (addr >= EGA_LO && addr < EGA_HI) {
+        ega_write8(addr - EGA_LO, (uint8_t)(val & 0xFF));
+        ega_write8(addr - EGA_LO + 1, (uint8_t)(val >> 8));
+        return;
+    }
     cpu->mem[addr] = (uint8_t)(val & 0xFF);
     cpu->mem[addr + 1] = (uint8_t)(val >> 8);
 }

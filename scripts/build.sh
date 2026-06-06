@@ -17,6 +17,7 @@ SRCS=(
   src/recomp/gen/recomp_*.c
   src/recomp/cpu.c
   src/recomp/dos_compat.c
+  src/recomp/ega.c
   src/recomp/hal/timer.c
   src/recomp/hal/input.c
   src/recomp/hal/video.c

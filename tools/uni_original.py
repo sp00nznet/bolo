@@ -125,7 +125,7 @@ def main():
             if lin in starts:
                 print(f"E {lin:06X}")
                 st["ecount"] += 1
-                if st["ecount"] >= 600:
+                if st["ecount"] >= 4000:
                     st["stop"] = "enter-trace done"; uc.emu_stop(); return
         if st["n"] > NMAX:
             uc.emu_stop()
