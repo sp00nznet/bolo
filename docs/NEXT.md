@@ -202,6 +202,36 @@ startup documentation (or compare against a known QB4.5 EXE whose startup is
 documented) before more emulation — the emulator is correct; the *model of the
 startup's intent* is what's incomplete.
 
+### Automated emulation harness (`tools/uni_startup.py`) — built & exhaustively run
+
+Rigged up a **fully scriptable Unicorn-Engine harness** (pip `unicorn`, no DOSBox
+GUI): loads the image into real-mode memory, seeds the DOS entry state, hooks
+INT/code/mem, runs, and reads regs/memory at every instruction. Ground-truth
+findings (this is the real CPU behavior, not hand-analysis):
+
+- **Low/normal load (LM small):** the `rep movsb` self-move is a downward
+  overlapping copy that **zeroes its own `push;retf`** (CS:0x2F → `00 00`);
+  execution falls into an `add [bx+si],al` zero-sled and wanders (~521 K insns).
+- **High/wraparound load (LM=0xE000):** the move becomes "up" (top=0xFB22 > CS=0x0011
+  wrapped), but `top:0xC5FF` exceeds 1 MB and **wraps back over low memory**, again
+  corrupting the startup. Execution reaches the QB runtime segment **0x1183** (~509 K
+  insns) but runs on corrupted/zero bytes and faults at `1183:E6D2` on `00 00`.
+
+So under **every** load model the self-move corrupts — and the `retf` keeps landing
+on a *copy of itself* (`top:0x34` = copied `retf`). That can't be the real behavior,
+so a precondition is still wrong.
+
+**Prime hypothesis now: PKLITE's own relocations were never applied.** `unpklite.py`
+stops at the LZ terminator and does not reconstruct/apply PKLITE's relocation table,
+so the unpacked image's segment words (and possibly the startup header fields the
+self-move reads) are still load-relative / unfixed. Applying them may change `[C]`/
+`[6]`/the move geometry so it no longer overlaps. **Do this next:** parse PKLITE's
+trailing reloc data (large+extra "long mode": `count` u16 groups, `+0xFFF` seg step;
+or inline via the `0xFE` segment-separators in the LZ stream) and apply the fixups,
+then re-run `uni_startup.py` (it's ready to validate). If that still corrupts,
+observe the original `BOLO3.EXE` in DOSBox-X `debug` (not installed here) to read the
+real load segment + the move's true src/dst — one observation settles it.
+
 ### QB4.5 startup investigation (results)
 
 Dug into it: there is **no public assembly-level spec** of the QB4.5 compiled-EXE
