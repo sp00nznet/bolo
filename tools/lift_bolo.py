@@ -25,8 +25,13 @@ sys.path.insert(0, os.path.join(TOOLS, "tools", "lift"))
 from decode16 import Decoder            # noqa: E402
 from lift16 import Lifter               # noqa: E402
 
-IMAGE = os.path.join(ROOT, "work", "BOLO3_image.bin")
-TOML = os.path.join(ROOT, "work", "bolo3.toml")
+# We lift from the post-startup SNAPSHOT (the fully PKLITE+QB-decompressed and
+# relocated runtime memory captured by tools/uni_original.py), NOT the static
+# pre-decompression image -- the real game/main code only exists after the QB
+# startup decompresses it. Functions are keyed by snapshot LINEAR address; the
+# recomp loads the snapshot 1:1 and dispatches with g_load_base=0.
+IMAGE = os.path.join(ROOT, "work", "snapshot.bin")
+TOML = os.path.join(ROOT, "work", "bolo3.toml")    # unused in snapshot mode
 OUT = os.path.join(ROOT, "src", "recomp", "gen")
 CHUNK = 40
 
@@ -35,12 +40,10 @@ FUNC_RE = re.compile(
     r"end = (0x[0-9A-Fa-f]+), size = (\d+), far = (true|false)")
 
 
-ENTRY = 0x20120          # CS:IP 2011:0010 from the PKLITE footer
+ENTRY = 0x1B484          # real program entry: runtime 1AB4:0944 -> snapshot linear
+ENTRY_SEG = 0x1AB4       # caller segment for the entry (for near-call resolution)
 MAXLEN = 0x2000          # cap a region scan so we don't run deep into data
-# Forced function starts: trampoline continuation points the static call graph
-# can't see. (Empty for now; the QB self-relocating startup needs reloc-aware
-# dispatch rather than forced starts -- see docs/NEXT.md.)
-FORCE_STARTS = set()
+FORCE_STARTS = {ENTRY}   # seed discovery from the real entry
 
 
 def load_funcs():
@@ -114,7 +117,7 @@ def discover(image, detected, far_seg):
     from decode16 import OpType
     N = len(image)
     segbase = dict(far_seg)
-    segbase[ENTRY] = 0x2011
+    segbase[ENTRY] = ENTRY_SEG
     far_sorted = sorted(far_seg.items())
     for _, s, _, _ in detected:                 # detected funcs: infer segbase
         segbase.setdefault(s, segbase_for(s, far_sorted))
@@ -152,8 +155,8 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     image = open(IMAGE, "rb").read()
     N = len(image)
-    detected = load_funcs()
-    far_of = {start: far for name, start, end, far in detected}
+    detected = []                 # snapshot mode: discover purely from far/near closure
+    far_of = {}
 
     from decode16 import OpType
     # segment-aware discovery -> {start: segbase}; recompute boundaries

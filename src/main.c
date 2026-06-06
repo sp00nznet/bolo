@@ -1,62 +1,54 @@
 /* Bolo Adventures III - static recomp entry point.
  *
- * Sets up a DOS-like load image in the flat recomp16 memory and dispatches to
- * the program entry. Layout mirrors how DOS loads an EXE:
+ * The QuickBASIC self-relocating/decompressing startup (PKLITE stub + QB
+ * __astart) is hard to run as static C, so we BYPASS it: tools/uni_original.py
+ * runs the original packed EXE through PKLITE + the QB startup in an emulator and
+ * snapshots the fully-decompressed/relocated memory + CPU state at the real
+ * program entry. We load that snapshot here and dispatch straight to the entry,
+ * so the lifted functions run on correct memory.
  *
- *   linear 0x000 : PSP (segment 0)
- *   linear 0x100 : load module (segment 0x10) == image offset 0
- *
- * The decompressor wrote the load module at PSP:0x100, so image offset 0 lives
- * at linear 0x100 and the load-module segment is 0x10. The PKLITE footer's
- * CS/SS are load-module-relative, so absolute CS = 0x10 + 0x2011, etc.
- * g_load_base tells the dispatcher that image offset 0 == linear 0x100.
+ *   snapshot.bin       : full 1 MB+ image at runtime linear positions
+ *   snapshot_regs.h    : post-startup CPU registers + entry + load base
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "cpu.h"
 #include "recomp/gen/bolo_recomp.h"
+#include "recomp/gen/snapshot_regs.h"
 
 extern unsigned long g_load_base;
 extern int g_trace;
 extern long g_dispatch_calls, g_dispatch_misses;
 
-#define LOAD_BASE 0x100          /* image offset 0 lives here (PSP:0x100)     */
-#define LM_SEG    0x10           /* load-module segment (PSP at segment 0)    */
-#define ENTRY_CS  (LM_SEG + 0x2011)
-#define ENTRY_IP  0x0010
-#define ENTRY_SS  (LM_SEG + 0x2348)
-#define ENTRY_SP  0x0080
-
 int main(int argc, char **argv)
 {
-    const char *path = argc > 1 ? argv[1] : "work/BOLO3_image.bin";
+    const char *path = argc > 1 ? argv[1] : "work/snapshot.bin";
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open image: %s\n", path); return 1; }
+    if (!f) { fprintf(stderr, "cannot open snapshot: %s\n", path); return 1; }
 
     static CPU cpu;
     memset(&cpu, 0, sizeof cpu);
     cpu.mem = calloc(MEM_SIZE, 1);
     if (!cpu.mem) { fprintf(stderr, "out of memory\n"); return 1; }
 
-    long n = fread(cpu.mem + LOAD_BASE, 1, MEM_SIZE - LOAD_BASE, f);
+    long n = fread(cpu.mem, 1, MEM_SIZE, f);
     fclose(f);
+    fprintf(stderr, "loaded snapshot %ld bytes\n", n);
 
-    /* minimal PSP at segment 0 */
-    cpu.mem[0] = 0xCD; cpu.mem[1] = 0x20;            /* INT 20h terminate     */
-    cpu.mem[2] = 0x00; cpu.mem[3] = 0xA0;            /* top of memory = 0xA000 */
-
-    g_load_base = LOAD_BASE;
+    g_load_base = 0;     /* snapshot-lift keys functions by raw runtime linear */
     g_trace = getenv("BOLO_TRACE") ? 1 : 0;
 
-    cpu.cs = ENTRY_CS; cpu.ip = ENTRY_IP;
-    cpu.ss = ENTRY_SS; cpu.sp = ENTRY_SP;
-    cpu.ds = 0; cpu.es = 0; cpu.ax = 0;
+    cpu.ax = SNAP_AX; cpu.bx = SNAP_BX; cpu.cx = SNAP_CX; cpu.dx = SNAP_DX;
+    cpu.si = SNAP_SI; cpu.di = SNAP_DI; cpu.bp = SNAP_BP; cpu.sp = SNAP_SP;
+    cpu.cs = SNAP_CS; cpu.ds = SNAP_DS; cpu.es = SNAP_ES; cpu.ss = SNAP_SS;
+    cpu.ip = SNAP_IP;
 
-    fprintf(stderr, "loaded %ld bytes at linear 0x%X; entry %04X:%04X\n",
-            n, LOAD_BASE, ENTRY_CS, ENTRY_IP);
+    fprintf(stderr, "dispatching real entry %04X:%04X (image 0x%05lX)\n",
+            SNAP_ENTRY_SEG, SNAP_ENTRY_OFF,
+            (unsigned long)SNAP_ENTRY_SEG * 16 + SNAP_ENTRY_OFF - SNAP_LOAD_BASE);
 
-    recomp_dispatch(&cpu, ENTRY_CS, ENTRY_IP);
+    recomp_dispatch(&cpu, SNAP_ENTRY_SEG, SNAP_ENTRY_OFF);
 
     fprintf(stderr, "entry returned. dispatch: %ld calls, %ld misses, halted=%d\n",
             g_dispatch_calls, g_dispatch_misses, cpu.halted);
