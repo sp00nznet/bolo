@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include "cpu.h"
 #include "recomp/gen/bolo_recomp.h"
 #include "recomp/gen/snapshot_regs.h"
@@ -20,6 +21,19 @@
 extern unsigned long g_load_base;
 extern int g_trace;
 extern long g_dispatch_calls, g_dispatch_misses;
+extern unsigned long g_ring[32];
+extern int g_ring_pos;
+
+static void on_crash(int sig)
+{
+    fprintf(stderr, "\n*** CRASH (sig %d) after %ld dispatches. "
+            "Last dispatched image offsets:\n", sig, g_dispatch_calls);
+    for (int i = 0; i < 16; i++) {
+        int idx = (g_ring_pos - 1 - i) & 31;
+        if (g_ring[idx]) fprintf(stderr, "    res_%06lX\n", g_ring[idx]);
+    }
+    _Exit(139);
+}
 
 int main(int argc, char **argv)
 {
@@ -36,6 +50,7 @@ int main(int argc, char **argv)
     fclose(f);
     fprintf(stderr, "loaded snapshot %ld bytes\n", n);
 
+    signal(SIGSEGV, on_crash);
     g_load_base = 0;     /* snapshot-lift keys functions by raw runtime linear */
     g_trace = getenv("BOLO_TRACE") ? 1 : 0;
 

@@ -24,6 +24,10 @@ long g_dispatch_calls = 0;
 long g_dispatch_misses = 0;
 static int g_depth = 0;             /* runaway guard */
 
+/* ring buffer of recent dispatch targets (for crash diagnosis) */
+unsigned long g_ring[32];
+int g_ring_pos = 0;
+
 static void (*lookup(unsigned long image_off))(CPU*)
 {
     int lo = 0, hi = g_dispatch_count - 1;
@@ -58,6 +62,7 @@ void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off)
     }
     if (g_trace && g_dispatch_calls <= 60)
         fprintf(stderr, "[icall] %04X:%04X -> image 0x%05lX\n", seg, off, image_off);
+    g_ring[g_ring_pos++ & 31] = image_off;
     g_depth++;
     fn(cpu);
     g_depth--;

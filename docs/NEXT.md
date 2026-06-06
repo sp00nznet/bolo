@@ -1,5 +1,38 @@
 # Runbook — where to pick up
 
+## ✅ MECHANICAL INTEGRATION DONE — native recomp runs real game code
+
+The recomp now boots from the post-startup snapshot and executes the real
+decompressed QB program:
+- `tools/uni_original.py` runs PKLITE + QB startup and dumps `work/snapshot.bin`
+  + `src/recomp/gen/snapshot_regs.h` at the real entry `1AB4:0944`.
+- `tools/lift_bolo.py` (snapshot mode) lifts from that snapshot: **947 functions,
+  420,268 instructions, near-call resolution 100%, ZERO stubs.**
+- `src/main.c` loads the snapshot 1:1, seeds regs, `g_load_base=0`, dispatches the
+  entry. `res_01B484` is verified-correct QB C-runtime startup (DOS version check,
+  stack setup) → calls the QB runtime (`res_014670` @1283) + game modules.
+- Build: `bash scripts/build.sh` then relink with `-Wl,--stack,0x8000000`.
+
+### Current debug frontier (iterative)
+It runs the entry + into the QB runtime, then **crashes (SIGSEGV)** after 3 missed
+indirect calls to `1AB4:0000` (cs:0, uninitialized). A SIGSEGV handler in main.c
+prints the dispatch ring buffer. KEY: the **harness runs this same code fine**
+end-to-end (to EGA init), so `1AB4:0000` is a *symptom of earlier divergence* in
+the recomp, not the real target. Next steps, in order:
+1. **Differential debug against the harness (ground truth).** Both
+   `uni_original.py` (real CPU) and the recomp execute the same code from the same
+   snapshot. Add a per-function entry trace to the lifter (emit `trace(addr)` at
+   each function top under `g_trace`) and compare the recomp's function-call
+   sequence to the harness's CS:IP trace to find the FIRST divergence — that's the
+   lifter/runtime bug.
+2. **Lifter gap: direct far `jmp seg:off` (tail calls)** are emitted as comments
+   (e.g. `res_01B484` ends with `jmp 1AB4:0010`). Add dispatch-or-tailcall handling
+   like the far-`call` path.
+3. Wire INT 10h (EGA→SDL2), INT 16h (keyboard), INT 21h (asset file loads) via the
+   recomp16 HAL so it progresses to rendering.
+
+
+
 Snapshot of the project state and the exact next moves, ordered by value. The
 foundation (Phases 0–2 + the bulk of Phase 3) is done; what remains is closing
 lift gaps and getting a build running.
