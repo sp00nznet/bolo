@@ -36,9 +36,11 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# NOTE: the original shareware game files in original/ ARE committed on purpose.
-# They are tiny (~185 KB total), freely-distributable 1993 shareware, and serve
-# as the ground-truth reference for the recompilation. The unpacked image and
-# analysis output under work/ are NOT committed — they regenerate in one command:
-#   python tools/unpklite.py original/BOLO3.EXE work/BOLO3_image.bin --mz work/BOLO3_unpacked.exe
-!original/
+# --- Original retail game files: NOT redistributed in this repo ---
+# Bolo Adventures III (c) 1993 William Soleau / Soleau Software. The game is
+# shareware (freely passable), but to be safe for a public repo we keep the
+# original binaries local-only. Drop the shareware files into original/ yourself.
+original/
+# Derived runtime artifacts (decompressed game image etc. -- regenerate from the
+# original via the tools; also copyrighted-derived so not redistributed).
+work/
