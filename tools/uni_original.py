@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""
+uni_original.py -- run the ORIGINAL packed BOLO3.EXE under Unicorn.
+
+Instead of hand-reconstructing PKLITE's relocation format, let PKLITE's own stub
+do the work: load the packed EXE the way DOS would (load segment + apply the MZ
+relocations), run the PKLITE stub -> it decompresses AND applies relocations, then
+jumps to the QB startup, which (now correctly relocated) self-moves, decompresses,
+relocates, and `ljmp cs:[0]` to the real program entry. We hook INT 21h for the
+stub's DOS calls and trace the control flow to capture the resolved entry and the
+fully-processed memory image.
+"""
+import struct
+import sys
+from unicorn import *
+from unicorn.x86_const import *
+
+EXE = "original/BOLO3.EXE"
+TOTAL = 0x110000
+LOAD_SEG = 0x0100                # DOS-like low load segment for the program
+PSP_SEG = LOAD_SEG - 0x10
+
+
+def main():
+    raw = open(EXE, "rb").read()
+    (e_magic, e_cblp, e_cp, e_crlc, e_cparhdr, e_minalloc, e_maxalloc,
+     e_ss, e_sp, e_csum, e_ip, e_cs, e_lfarlc, e_ovno) = struct.unpack_from("<14H", raw, 0)
+    hdr_bytes = e_cparhdr * 16
+    img_size = (e_cp - 1) * 512 + (e_cblp or 512) - hdr_bytes
+    load_module = raw[hdr_bytes:hdr_bytes + img_size]
+    print(f"MZ: hdr={hdr_bytes:#x} module={len(load_module):#x} relocs={e_crlc} "
+          f"CS:IP={e_cs:04x}:{e_ip:04x} SS:SP={e_ss:04x}:{e_sp:04x}")
+
+    uc = Uc(UC_ARCH_X86, UC_MODE_16)
+    uc.mem_map(0, TOTAL)
+    uc.mem_write(LOAD_SEG * 16, load_module)
+    # PSP
+    uc.mem_write(PSP_SEG * 16, b"\xCD\x20")
+    uc.mem_write(PSP_SEG * 16 + 2, struct.pack("<H", 0x9FFF))   # top of memory
+    # apply MZ relocations (add LOAD_SEG to each listed word)
+    for i in range(e_crlc):
+        off, seg = struct.unpack_from("<HH", raw, e_lfarlc + i * 4)
+        a = ((PSP_SEG + 0x10 + seg) << 4) + off    # relocations are module-relative
+        v = (struct.unpack("<H", uc.mem_read(a, 2))[0] + LOAD_SEG) & 0xFFFF
+        uc.mem_write(a, struct.pack("<H", v))
+
+    cs0 = (LOAD_SEG + e_cs) & 0xFFFF
+    ss0 = (LOAD_SEG + e_ss) & 0xFFFF
+    for r, v in ((UC_X86_REG_CS, cs0), (UC_X86_REG_IP, e_ip),
+                 (UC_X86_REG_SS, ss0), (UC_X86_REG_SP, e_sp),
+                 (UC_X86_REG_DS, PSP_SEG), (UC_X86_REG_ES, PSP_SEG),
+                 (UC_X86_REG_AX, 0), (UC_X86_REG_BX, 0)):
+        uc.reg_write(r, v)
+
+    st = {"n": 0, "last_cs": None, "trans": 0}
+    NMAX = 30_000_000
+    QB_ENTRY = (LOAD_SEG + 0x2011)      # the QB startup segment (post-PKLITE)
+
+    def hook_code(uc, address, size, _):
+        st["n"] += 1
+        cs = uc.reg_read(UC_X86_REG_CS)
+        if cs != st["last_cs"]:
+            st["trans"] += 1
+            ip = uc.reg_read(UC_X86_REG_IP)
+            tag = ""
+            if cs == QB_ENTRY:
+                tag = "  <== QB startup reached!"
+            if st["trans"] <= 80:
+                print(f"[{st['n']:9}] CS {st['last_cs']} -> {cs:04x}:{ip:04x} "
+                      f"(lin {address:#07x}){tag}")
+            st["last_cs"] = cs
+        # capture the QB final handoff: jmp far cs:[bx] = 2E FF 2F
+        code = uc.mem_read(address, 3)
+        if bytes(code) == b"\x2e\xff\x2f":
+            bx = uc.reg_read(UC_X86_REG_BX)
+            a = (cs << 4) + bx
+            off = struct.unpack("<H", uc.mem_read(a, 2))[0]
+            seg = struct.unpack("<H", uc.mem_read(a + 2, 2))[0]
+            print(f"\n*** QB ljmp cs:[bx] at {cs:04x}: target {seg:04x}:{off:04x} "
+                  f"linear {(seg<<4)+off:#07x}")
+            st["qb_entry"] = (seg, off)
+        if st["n"] > NMAX:
+            uc.emu_stop()
+
+    def cf(set_):
+        fl = uc.reg_read(UC_X86_REG_EFLAGS)
+        uc.reg_write(UC_X86_REG_EFLAGS, (fl | 1) if set_ else (fl & ~1))
+
+    handles = {}
+    def hook_intr(uc, intno, _):
+        ax = uc.reg_read(UC_X86_REG_AX); ah = (ax >> 8) & 0xFF
+        if intno == 0x21:
+            if ah == 0x4C:
+                st["stop"] = f"INT21/4C exit {ax & 0xFF}"; uc.emu_stop(); return
+            if ah == 0x30:
+                uc.reg_write(UC_X86_REG_AX, 0x0005); return
+            if ah in (0x4A, 0x48, 0x49, 0x25, 0x35, 0x1A):
+                if ah == 0x48: uc.reg_write(UC_X86_REG_AX, 0x4000)
+                cf(False); return
+            if ah == 0x3D:                       # OPEN FILE -- the asset loader!
+                dx = uc.reg_read(UC_X86_REG_DX); ds = uc.reg_read(UC_X86_REG_DS)
+                a = (ds << 4) + dx
+                name = bytes(uc.mem_read(a, 16)).split(b"\x00")[0].decode("latin1", "replace")
+                st.setdefault("opens", []).append(name)
+                print(f"  *** INT21/3D OPEN '{name}'  (game asset load reached!)")
+                # try to satisfy it from disk so the game keeps going
+                import os
+                path = os.path.join("original", os.path.basename(name))
+                if os.path.exists(path):
+                    fd = len(handles) + 5; handles[fd] = open(path, "rb")
+                    uc.reg_write(UC_X86_REG_AX, fd); cf(False)
+                else:
+                    uc.reg_write(UC_X86_REG_AX, 2); cf(True)   # file not found
+                if len(st["opens"]) >= 3:
+                    st["stop"] = "reached asset loading"; uc.emu_stop()
+                return
+            cf(False); return                    # other INT 21h -> succeed-ish
+        if intno == 0x20:
+            st["stop"] = "INT 20h"; uc.emu_stop(); return
+        # other INTs (10h video, 16h kbd, 1Ah timer): ignore/stub
+
+    uc.hook_add(UC_HOOK_CODE, hook_code)
+    uc.hook_add(UC_HOOK_INTR, hook_intr)
+
+    begin = cs0 * 16 + e_ip
+    print(f"start {cs0:04x}:{e_ip:04x} (lin {begin:#07x}); QB startup seg = {QB_ENTRY:#06x}")
+    try:
+        uc.emu_start(begin, TOTAL, count=NMAX)
+    except UcError as e:
+        cs = uc.reg_read(UC_X86_REG_CS); ip = uc.reg_read(UC_X86_REG_IP)
+        print(f"\nUcError: {e} after {st['n']} insns at {cs:04x}:{ip:04x}")
+        pc = (cs << 4) + ip
+        print("  bytes@pc:", bytes(uc.mem_read(pc, 16)).hex(' '))
+        return
+    print(f"\nstopped: {st.get('stop')} after {st['n']} insns, {st['trans']} CS transitions")
+    if "qb_entry" in st:
+        print("QB REAL ENTRY:", st["qb_entry"])
+
+
+if __name__ == "__main__":
+    main()

@@ -202,6 +202,38 @@ startup documentation (or compare against a known QB4.5 EXE whose startup is
 documented) before more emulation — the emulator is correct; the *model of the
 startup's intent* is what's incomplete.
 
+### ★★ BOOT CRACKED — the game runs end-to-end in the harness (`tools/uni_original.py`)
+
+Running the *original packed* `BOLO3.EXE` through the Unicorn harness boots Bolo
+end-to-end: **PKLITE stub** decompresses + relocates → **QB startup** (CS=0x2111)
+self-moves (now correctly, move-up) + decompresses + relocates → **`ljmp cs:[0]`
+resolves the real entry `1AB4:0944`** → the program executes the **QB runtime**
+(CS=0x1283) and then the **game's EGA/VGA initialization** (INT 10h AH=0x12 EGA/VGA
+detect, 0x0F get-mode, 0x1B functionality, 0x11 char-gen, 0x03/0x05). That is
+exactly Bolo's "Requires EGA/VGA" startup — it boots and reaches video setup.
+
+**Key numbers (use these to make the recomp boot):**
+- **Real program entry = image offset `0x1A484`** (runtime `1AB4:0944`, linear
+  0x1B484, minus the `0x1000` load base). Add it as a forced lifted-function start
+  (`res_01A484`); the lifter currently splits it between 0x1A31E and 0x1A538.
+- **Load-base mapping confirmed:** `image_offset = runtime_linear − 0x1000`
+  (runtime seg 0x1283 == classified runtime image seg 0x1183 + 0x100). So the recomp
+  should set `g_load_base = 0x1000` and place the image at linear 0x1000... OR keep
+  it image-relative and subtract 0x100 from runtime segments in dispatch.
+- The QB startup MUST run first (it decompresses DGROUP + applies relocations).
+
+**Recomp integration (clear path to a running native binary):**
+1. Use `uni_original.py` to run PKLITE+QB-startup, then **dump the fully-processed
+   memory** (the program region) at the moment control reaches `1AB4:0944`.
+2. Load that dumped memory as the recomp's `cpu.mem` (it has decompressed DGROUP +
+   applied relocations), set `g_load_base` per the mapping above.
+3. Add `0x1A484` as a forced start and `recomp_dispatch` to it from `main.c`.
+4. The lifted functions then execute on correct memory; wire the INT 10h/16h/21h
+   shims (recomp16 HAL) so EGA output + keyboard + asset file loads work.
+Alternatively, extract PKLITE's reloc list by diffing harness memory pre/post and
+bake a fully-relocated static image — but dumping the post-startup snapshot is
+simplest and is what the harness already produces.
+
 ### ★ ROOT CAUSE FOUND (confirmed in the Unicorn harness): missing PKLITE relocations
 
 The startup self-move corrupts only because **`unpklite.py` never applied PKLITE's
