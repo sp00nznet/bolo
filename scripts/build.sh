@@ -21,6 +21,7 @@ SRCS=(
   src/recomp/hal/input.c
   src/recomp/hal/video.c
   src/recomp/platform/sdl_platform.c
+  src/icall.c
   src/main.c
 )
 # NOTE: src/recomp/startup.c is intentionally excluded -- it is the civ-specific

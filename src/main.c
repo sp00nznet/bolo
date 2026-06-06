@@ -1,16 +1,15 @@
 /* Bolo Adventures III - static recomp entry point.
  *
- * Loads the decompressed BOLO3 load image into the recomp16 flat memory at
- * linear base 0 (so the image's unrelocated segment values map 1:1 to image
- * offsets, matching the lifted call graph), seeds the CPU registers from the
- * PKLITE register footer, and dispatches to the program entry.
+ * Sets up a DOS-like load image in the flat recomp16 memory and dispatches to
+ * the program entry. Layout mirrors how DOS loads an EXE:
  *
- * STATUS (Phase 3): segment-aware discovery lifts 932 functions (the whole
- * in-image call graph, including the QuickBASIC/CRT startup at CS:IP=2011:0010
- * / image 0x20120 dispatched below). Only 14 out-of-image far targets remain
- * stubbed. Bring-up now runs the startup until it reaches an unhandled x87 FPU
- * op or an indirect-dispatch site (both still emitted as comments) -- those are
- * the next gaps to close. See docs/PLAN.md Phase 3.
+ *   linear 0x000 : PSP (segment 0)
+ *   linear 0x100 : load module (segment 0x10) == image offset 0
+ *
+ * The decompressor wrote the load module at PSP:0x100, so image offset 0 lives
+ * at linear 0x100 and the load-module segment is 0x10. The PKLITE footer's
+ * CS/SS are load-module-relative, so absolute CS = 0x10 + 0x2011, etc.
+ * g_load_base tells the dispatcher that image offset 0 == linear 0x100.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,22 +17,16 @@
 #include "cpu.h"
 #include "recomp/gen/bolo_recomp.h"
 
-/* program entry, from the PKLITE footer */
-#define ENTRY_CS 0x2011
-#define ENTRY_IP 0x0010
-#define ENTRY_SS 0x2348
-#define ENTRY_SP 0x0080
+extern unsigned long g_load_base;
+extern int g_trace;
+extern long g_dispatch_calls, g_dispatch_misses;
 
-typedef struct { unsigned long addr; void (*fn)(CPU*); } dispatch_t;
-extern const dispatch_t g_dispatch[];
-extern const int g_dispatch_count;
-
-static void (*lookup(unsigned long addr))(CPU*)
-{
-    for (int i = 0; i < g_dispatch_count; i++)
-        if (g_dispatch[i].addr == addr) return g_dispatch[i].fn;
-    return NULL;
-}
+#define LOAD_BASE 0x100          /* image offset 0 lives here (PSP:0x100)     */
+#define LM_SEG    0x10           /* load-module segment (PSP at segment 0)    */
+#define ENTRY_CS  (LM_SEG + 0x2011)
+#define ENTRY_IP  0x0010
+#define ENTRY_SS  (LM_SEG + 0x2348)
+#define ENTRY_SP  0x0080
 
 int main(int argc, char **argv)
 {
@@ -46,23 +39,26 @@ int main(int argc, char **argv)
     cpu.mem = calloc(MEM_SIZE, 1);
     if (!cpu.mem) { fprintf(stderr, "out of memory\n"); return 1; }
 
-    /* load image at linear base 0 */
-    long n = fread(cpu.mem, 1, MEM_SIZE, f);
+    long n = fread(cpu.mem + LOAD_BASE, 1, MEM_SIZE - LOAD_BASE, f);
     fclose(f);
-    fprintf(stderr, "loaded %ld bytes at linear 0\n", n);
+
+    /* minimal PSP at segment 0 */
+    cpu.mem[0] = 0xCD; cpu.mem[1] = 0x20;            /* INT 20h terminate     */
+    cpu.mem[2] = 0x00; cpu.mem[3] = 0xA0;            /* top of memory = 0xA000 */
+
+    g_load_base = LOAD_BASE;
+    g_trace = getenv("BOLO_TRACE") ? 1 : 0;
 
     cpu.cs = ENTRY_CS; cpu.ip = ENTRY_IP;
     cpu.ss = ENTRY_SS; cpu.sp = ENTRY_SP;
-    cpu.ds = 0; cpu.es = 0;
+    cpu.ds = 0; cpu.es = 0; cpu.ax = 0;
 
-    unsigned long entry = (unsigned long)ENTRY_CS * 16 + ENTRY_IP;
-    void (*fn)(CPU*) = lookup(entry);
-    if (!fn) {
-        fprintf(stderr,
-            "entry 0x%05lX not in lifted set yet (QB/CRT startup unlifted).\n"
-            "Phase 3 next: lift the startup + runtime call targets.\n", entry);
-        return 2;
-    }
-    fn(&cpu);
+    fprintf(stderr, "loaded %ld bytes at linear 0x%X; entry %04X:%04X\n",
+            n, LOAD_BASE, ENTRY_CS, ENTRY_IP);
+
+    recomp_dispatch(&cpu, ENTRY_CS, ENTRY_IP);
+
+    fprintf(stderr, "entry returned. dispatch: %ld calls, %ld misses, halted=%d\n",
+            g_dispatch_calls, g_dispatch_misses, cpu.halted);
     return 0;
 }

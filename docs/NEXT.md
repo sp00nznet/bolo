@@ -45,21 +45,36 @@ push ax ; push 0x34 ; retf  ; computed far jump to relocated_seg:0x0034
    (NOTE: an earlier draft wrongly said "no PSP -> garbage"; because `DS=CS`, the
    `ds:[..]` reads are code-segment data and are valid — the real miss is the
    0x100 load base + `ES=PSP` seeding.)
-2. **Computed control flow + self-relocation.** The startup physically moves the
-   program (`rep movsb`) and `retf`-trampolines to the *moved copy* — but our
-   lifted functions are static C at original image offsets, so the moved copy has
-   no code to run. Two viable fixes:
-   - **Dispatch with relocation delta:** add `recomp_dispatch(cpu,seg,off)` (binary-
-     search `g_dispatch`, map `seg*16+off - reloc_base` → image offset) and emit it
-     for indirect `call`/`jmp` and for `retf`-when-the-target-resolves. The
-     relocation is a constant paragraph shift, so the delta is a single constant.
-   - **Bypass the relocation:** skip the self-move and jump straight to the post-
-     relocation QB entry (the runtime init + user main), mapped back to its original
-     image offset. Often the pragmatic choice for self-relocating CRT startups.
+   **DONE:** `main.c` now loads at linear 0x100, seeds a PSP at segment 0, and sets
+   `CS=0x10+0x2011`, `SS=0x10+0x2348`. `g_load_base=0x100` tells the dispatcher
+   image offset 0 == linear 0x100.
 
-These are coupled: fix the 0x100 load base + PSP seeding first (quick, in
-`main.c`), then make `retf`/indirect transfers dispatch — each change is now
-testable in the build/run loop (`scripts/build.sh` + run).
+2. **Computed control flow — dispatch DONE; self-relocation is the open blocker.**
+   `recomp_dispatch()` (src/icall.c) is wired: the lifter now emits it for indirect
+   `call`/`jmp` and `retf` (opt-in `Lifter.dispatch`; civ unaffected). The entry
+   dispatches correctly. The wall is the QB self-relocating startup. Exact disasm
+   (CS image base 0x20110; header `[4]` scratch, `[6]`=0xC600 move count,
+   `[C]`=0x1B22 program paragraphs):
+   ```
+   CS:0010 inc dx ; mov bp,ax ; mov ax,es ; add ax,0x10   ; ax = load module seg
+   CS:0018 push cs ; pop ds                                 ; DS = CS (header reads)
+   CS:001a mov [4],ax ; add ax,[0xC] ; mov es,ax           ; ES = top = LM + 0x1B22
+   CS:0023 mov cx,[6] ; mov di,cx ; dec di ; mov si,di ; std
+   CS:002d rep movsb                                        ; copy program to `top`
+   CS:002f push ax ; mov ax,0x34 ; push ax ; retf           ; jump to top:0x0034
+   ```
+   The `retf` jumps into the *relocated copy* at `top:0x34`. At runtime we observe
+   the miss `1B32:0034 -> image 0x1B254` (top=0x1B32). Our lifted functions are
+   static C at original offsets, so the copy has no code. Two ways through:
+   - **Relocation-aware dispatch:** track the self-move (record that segment `top`
+     aliases the original load-module segment, delta = orig − top paragraphs) and in
+     `recomp_dispatch` map a relocated `seg:off` back to the original image offset.
+     The program relocates a small number of times, so a short alias table suffices.
+   - **Bypass the startup:** skip the self-relocation and call the post-relocation
+     QB entry (runtime init → user `main`) directly with the environment hand-set.
+     Usually the pragmatic choice for self-relocating CRT startups.
+   Either is now iterable in the build/run loop (`scripts/build.sh`; run with
+   `BOLO_TRACE=1` to watch dispatch).
 
 ## Next moves (in order)
 

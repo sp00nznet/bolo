@@ -101,11 +101,16 @@ See `RECON.md`. Single 80 KB PKLITE'd 16-bit MZ; `.OVx`/`.JFT` are data.
 - [x] **Runs without crashing.** Loads the image at linear 0, calls the entry
       `res_020120`, and executes real lifted startup code — segment setup + a
       `rep movsb` self-relocation — then returns cleanly (exit 0).
-- [ ] **Next blocker: computed control flow.** The QB startup trampolines via
-      `push 0x34; retf` (a computed far jump). The lifter renders `retf` as a C
-      `return`, so it returns to `main` instead of following the trampoline. Need
-      `retf`/indirect `call`/`jmp` to dispatch through `g_dispatch` (now testable in
-      the build/run loop). This is the same indirect-dispatch work noted in Phase 3.
+- [x] **Computed-transfer dispatch wired.** `recomp_dispatch()` (src/icall.c) +
+      opt-in lifter emission for `retf`/indirect `call`/`jmp`. `main.c` sets up the
+      DOS load layout (image at linear 0x100, PSP, segment-seeded registers). The
+      entry now dispatches correctly through the call graph.
+- [ ] **Open blocker: QB self-relocating startup.** The startup `rep movsb`-copies
+      the program to a new segment and `retf`s into the copy (observed: trampoline
+      to `1B32:0034`). Our lifted code is static at original offsets, so the copy is
+      empty. Fix: relocation-aware dispatch (alias relocated segments back to
+      original) OR bypass the startup and call the post-relocation QB entry. See
+      docs/NEXT.md for the exact disassembly + plan.
 - [ ] Then: boot → main menu → select puzzle → move Mr. Bolo → solve room 1.
 
 ### Phase 6 — Ship & extend
