@@ -76,6 +76,36 @@ push ax ; push 0x34 ; retf  ; computed far jump to relocated_seg:0x0034
    Either is now iterable in the build/run loop (`scripts/build.sh`; run with
    `BOLO_TRACE=1` to watch dispatch).
 
+### Full QB startup analysis (disassembled CS:0x10–0xB0)
+
+The entry is a 3-phase QuickBASIC/BCOM loader:
+- **Phase 1 (CS:0x10–0x34): self-move + trampoline.** Computes `top` from a code-
+  segment header (`[6]`=move count 0xC600, `[C]`=0x1B22 paras), `rep movsb`-copies
+  the segment to `top`, then `push top; push 0x34; retf` into the copy.
+- **Phase 2 (CS:0x35–0xA0): LZ/RLE decompressor.** Reads a control byte into `dl`,
+  a count into `cx`, then `and al,0xFE; cmp al,0xB0` → `rep stosb` (run fill) or
+  `cmp al,0xB2` → `rep movsb` (copy). Classic byte-LZ.
+- **Phase 3 (CS:0xA2+): relocation apply.** `mov si,0x132; push cs; pop ds;
+  mov bx,[4]; lodsw …` walks a relocation list and patches segment words.
+- Then it calls the QB runtime init and the user `main`.
+
+**KEY INSIGHT that reframes path 1 vs bypass:** the image is *already fully
+unpacked* — PKLITE produced the final bytes, and the DGROUP data is readable
+verbatim in `work/BOLO3_image.bin` (the filename table at 0x1D1E9, all strings,
+clean function bodies). So phases 1–3 (move/decompress/relocate the program into
+its run-time position) are **redundant for the recomp**: our lifted functions are
+static C and the data is already in place. Trying to run phases 1–3 faithfully
+fights an approximated DOS environment (the self-move trampoline currently lands
+on a copied `retf` and the stack region is BSS/zero, a dead end).
+
+**Therefore the bypass is now the clearly-better route:** skip phases 1–3 and jump
+straight to the post-startup QB entry — the runtime init + user `main` — with
+`DS = DGROUP` (the data segment) set up by hand. To find that entry, follow the
+phase-3 tail: after relocation it `retf`/calls into the runtime; that target (mapped
+to its image offset) is the bypass entry. Set `cpu.ds`/`cpu.es` to the DGROUP
+paragraph and `recomp_dispatch` to it. The dispatch infrastructure (src/icall.c)
+and the build/run/trace loop are ready for this.
+
 ## Next moves (in order)
 
 ### 1. Get a first build  *(needs MSVC + SDL2 — not present in the dev env used so far)*
