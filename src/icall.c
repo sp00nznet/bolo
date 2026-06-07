@@ -129,6 +129,14 @@ void recomp_enter(unsigned long addr)
                     (c->flags & FLAG_DF) ? 1 : 0);
         else if (addr == 0x0173FA)  /* block B: string-space bounds setup */
             fprintf(stderr, "[heap] block-B res_0173FA enter#%ld ds=%04X\n", g_enter_n, c->ds);
+        else if (addr == 0x017E40)  /* string allocator (sets head=si) */
+            fprintf(stderr, "[heap] alloc res_017E40 enter#%ld si=%04X head=%04X\n", g_enter_n,
+                    c->si, c->mem[(uint32_t)c->ds*16+0x4846]|(c->mem[(uint32_t)c->ds*16+0x4847]<<8));
+        else if (addr == 0x017E82)  /* sets head=di */
+            fprintf(stderr, "[heap] res_017E82 enter#%ld di=%04X cx=%04X\n", g_enter_n, c->di, c->cx);
+        else if (addr == 0x017D00)  /* heap walker (loops if head bad) */
+            fprintf(stderr, "[heap] walker res_017D00 enter#%ld si=%04X head=%04X\n", g_enter_n,
+                    c->si, c->mem[(uint32_t)c->ds*16+0x4846]|(c->mem[(uint32_t)c->ds*16+0x4847]<<8));
         else if (addr == 0x017D7C)  /* heap initializer */
             fprintf(stderr, "[heap] INIT res_017D7C enter#%ld ds=%04X cx=%04X\n",
                     g_enter_n, c->ds, c->cx);

@@ -1,5 +1,37 @@
 # Runbook — where to pick up
 
+## ▶▶▶ ROOT CAUSE (2026-06-07, oracle session): QB string-space INIT never runs
+
+Built a faithful DOS layer in `uni_original.py` (MCB arena + INT 21h post-entry,
+mirroring `dos_compat.c`) to make the harness a valid oracle past the heap. It is
+NOT sufficient, and the why is now pinned precisely:
+
+- `res_017D00` (QB string-heap walker, `si -= ds:[si-3]` until `ds:[si]`∈{4,8}) has
+  **no `head==0` guard** — it assumes the string heap is already initialized (head
+  `ds:[0x4846]` set, a `0x4`/`0x8` terminator written).
+- That initializer is **`res_017D7C`** (writes head + `ds:[si]=4` terminator), which
+  sits in **unreachable block E (`0x17429`, mid-`res_0173CA`)** and **NEVER RUNS in
+  truth OR our recomp** (nothing references `0x17429`; it's not in any init table we
+  captured, and truth loops before it would be called).
+- Consequence: the string space is never set up. **Truth** (even with the faithful
+  arena) loops in `res_017D00` @0x17D12 with `head=0`, `si=0` (verified: PC pinned
+  there every 4M insns; init table fully patched `[0007,1e65,4bca,...]` but
+  `head[4846]=0`). **Our recomp** never calls the allocator/walker/GC at all
+  (`res_017E40`/`res_017D00`/`res_017B81` run 0 times) — it took a divergent path that
+  *avoids* the string heap, which is why the GC "vanished" and it reached graphics on
+  unvalidated state (the degenerate `(0,0,0,0)` line / clip loop).
+
+**So both sides diverge from real DOS at the string-space init.** The next target is
+concrete: figure out how block E / `res_017D7C` is reached on real DOS (the QB
+CLEAR / string-space-commit protocol — block B `res_0173FA` sets the bounds
+`ds:[0x45B4]/[0x45B6]` from `ds:[0x4C0A]/[0x4C08]`; block E reads them and calls
+`res_017D7C`), then make it run (force/trigger the init) so the heap is set up before
+the walker. Once truth's heap inits, the harness becomes a valid oracle and should
+render the title; then re-diff to validate our recomp's graphics path.
+
+Diagnostics this session: `BOLO_HEAP` now beacons the dispatcher / block B / alloc /
+walker / GC; harness has `UNI_EGA`, periodic PC+table sampler, faithful INT 21h.
+
 ## ★★★ MILESTONE (2026-06-07): heap init fixed — the recomp reaches GRAPHICS RENDERING
 
 The QB string-heap GC infinite loop is **fixed**, and the recomp now runs all the way
