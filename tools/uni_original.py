@@ -120,10 +120,19 @@ def main():
                 dump_snapshot(uc, st["qb_entry"])
                 st["stop"] = "snapshot at real entry"; uc.emu_stop(); return
             st["tracing"] = True; st["ecount"] = 0
+            t0 = struct.unpack("<H", uc.mem_read(0x1B8A0, 2))[0]
+            print(f"  [entry] mem[0x1B8A0] (table[0]) = {t0:#06x}")
         if st.get("tracing"):
             lin = (cs << 4) + uc.reg_read(UC_X86_REG_IP)
             if lin in starts:
-                print(f"E {lin:06X}")
+                if st["ecount"] < 200:
+                    R = UC_X86_REG_AX, UC_X86_REG_BX, UC_X86_REG_CX, UC_X86_REG_DX, \
+                        UC_X86_REG_SI, UC_X86_REG_DI, UC_X86_REG_BP, UC_X86_REG_DS, UC_X86_REG_ES
+                    v = [uc.reg_read(r) & 0xFFFF for r in R]
+                    print("E %06X cs=%04X:%04X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X bp=%04X ds=%04X es=%04X"
+                          % (lin, cs, uc.reg_read(UC_X86_REG_IP) & 0xFFFF, *v))
+                else:
+                    print(f"E {lin:06X}")
                 st["ecount"] += 1
                 if st["ecount"] >= 4000:
                     st["stop"] = "enter-trace done"; uc.emu_stop(); return
@@ -169,6 +178,17 @@ def main():
 
     uc.hook_add(UC_HOOK_CODE, hook_code)
     uc.hook_add(UC_HOOK_INTR, hook_intr)
+
+    WATCH = int(os.environ.get("UNI_WATCH", "0"), 0) if "os" in dir() else 0
+    import os as _os
+    WATCH = int(_os.environ.get("UNI_WATCH", "0"), 0)
+    if WATCH and st.get is not None:
+        def hook_mw(uc, access, address, size, value, _):
+            if WATCH <= address < WATCH + 2 and st.get("tracing"):
+                cs = uc.reg_read(UC_X86_REG_CS); ip = uc.reg_read(UC_X86_REG_IP)
+                print(f"  [W] {address:#07x} <= {value:#06x} ({size}B) by {cs:04x}:{ip:04x} "
+                      f"enter#{st.get('ecount')}")
+        uc.hook_add(UC_HOOK_MEM_WRITE, hook_mw)
 
     begin = cs0 * 16 + e_ip
     print(f"start {cs0:04x}:{e_ip:04x} (lin {begin:#07x}); QB startup seg = {QB_ENTRY:#06x}")

@@ -37,6 +37,43 @@ extern int g_trace;
 extern long g_dispatch_calls, g_dispatch_misses;
 extern unsigned long g_ring[32];
 extern int g_ring_pos;
+extern long g_enter_n;
+extern unsigned long g_last_enter;
+extern unsigned long g_enter_ring[64];
+extern int g_enter_ring_pos;
+
+#include <windows.h>
+/* Watchdog: if the game wedges in an intra-function goto-loop (no recomp_enter,
+ * so the enter-count dump never fires), this thread dumps the recent call path
+ * after a timeout so we can find the looping function. Enable with BOLO_WATCHDOG. */
+static DWORD WINAPI watchdog(LPVOID arg)
+{
+    DWORD secs = (DWORD)(size_t)arg;
+    Sleep(secs * 1000);
+    fprintf(stderr, "\n*** WATCHDOG fired after %lu s: %ld enters, "
+            "last func res_%06lX\n", (unsigned long)secs, g_enter_n, g_last_enter);
+    fprintf(stderr, "recent call path (newest first):\n");
+    for (int i = 0; i < 24; i++) {
+        int idx = (g_enter_ring_pos - 1 - i) & 63;
+        if (g_enter_ring[idx]) fprintf(stderr, "    res_%06lX\n", g_enter_ring[idx]);
+    }
+    extern CPU *g_dbg_cpu;
+    if (g_dbg_cpu) {
+        CPU *c = g_dbg_cpu;
+        fprintf(stderr, "regs ds=%04X es=%04X ss=%04X si=%04X di=%04X ax=%04X bx=%04X\n",
+                c->ds, c->es, c->ss, c->si, c->di, c->ax, c->bx);
+        unsigned long dbase = (unsigned long)c->ds * 16;
+        fprintf(stderr, "ds:[0x4846]=%04X (heap head)\n",
+                c->mem[dbase+0x4846] | (c->mem[dbase+0x4847]<<8));
+        unsigned long sp = dbase + c->si;
+        fprintf(stderr, "heap @ds:si-8 .. si+8: ");
+        for (long o = -8; o <= 8; o++)
+            fprintf(stderr, "%02X ", c->mem[sp+o]);
+        fprintf(stderr, "\n  byte ds:[si]=%02X  word ds:[si-3]=%04X (block size)\n",
+                c->mem[sp], c->mem[sp-3] | (c->mem[sp-2]<<8));
+    }
+    _Exit(42);
+}
 
 static void on_crash(int sig)
 {
@@ -80,6 +117,18 @@ int main(int argc, char **argv)
     dos_init(&dos, &cpu, "original");
     dos.poll_events = feed_keys;               /* feed scripted keystrokes */
     extern CPU *g_dbg_cpu; g_dbg_cpu = &cpu;   /* for debug screen dumps */
+
+    if (getenv("BOLO_WATCH")) {
+        extern uint32_t g_watch_addr;
+        g_watch_addr = (uint32_t)strtoul(getenv("BOLO_WATCH"), NULL, 0);
+        fprintf(stderr, "watching writes to linear 0x%05lX\n", (unsigned long)g_watch_addr);
+    }
+
+    if (getenv("BOLO_WATCHDOG")) {
+        DWORD secs = (DWORD)atoi(getenv("BOLO_WATCHDOG"));
+        if (!secs) secs = 10;
+        CreateThread(NULL, 0, watchdog, (LPVOID)(size_t)secs, 0, NULL);
+    }
 
     fprintf(stderr, "dispatching real entry %04X:%04X (image 0x%05lX)\n",
             SNAP_ENTRY_SEG, SNAP_ENTRY_OFF,

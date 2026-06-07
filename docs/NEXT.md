@@ -1,5 +1,58 @@
 # Runbook — where to pick up
 
+## ▶ SESSION UPDATE (2026-06-06): control-flow lifter fixes + dispatch-table discovery
+
+The recomp now executes **~286K instructions** (was wedging at ~4K) before hitting
+the current frontier. Found and fixed a chain of real lifter bugs by differential
+tracing against the Unicorn ground truth (`uni_original.py --enter-trace`, now with
+per-enter register dumps) plus new runtime diagnostics.
+
+**Lifter fixes (in the SHARED toolkit `D:/recomp/pc/tools/tools/lift/lift16.py`):**
+1. **Out-of-function `jcc`/`jmp`/`loop*`/`jcxz` were dropped to comments.** They are
+   tail-jumps to other functions; now emit a real tail-call (`fn(cpu); return;`) or
+   `recomp_dispatch(...)` fallback. New helper `_tail_jump(abs)`. This was THE bug
+   behind the `res_013AAF`/`res_013B42` infinite clip/line-draw loops.
+2. **Fallthrough off the end of a function** (last insn not a terminator) now emits a
+   tail-call into the next function (QB runtime shares tails by falling through).
+3. **`mov <sreg>, *` write** emitted `SEG_xxxx = ...` (assigning a `#define`); now
+   writes `cpu-><sreg>`.
+4. **Dispatch-table discovery (`tools/lift_bolo.py` `discover()`):** QB runtime uses
+   `call/jmp word cs:[reg+disp]` jump tables whose entries point INTO the middle of
+   shared blocks (e.g. table[0]=`0x003A`→`0x1B8CA`, mid-`res_01B8B4`). Added a scan
+   that registers each table entry as a function start (skipping null/`0x00` slots so
+   we don't turn embedded data like the `MSEM87…` signature into a bogus function).
+   Functions 947 → 1084.
+
+**New diagnostics (all env-gated, off by default):**
+- `BOLO_WATCHDOG=<sec>` — watchdog thread dumps the recent call-path (enter-ring) on
+  hang. Catches intra-function `goto` loops that never call `recomp_enter`.
+- `BOLO_WATCH=0x<lin>` (+ `BOLO_WATCH_FF`) — memory write watchpoint; prints/stops on
+  writes to a linear address (used to trace heap corruption).
+- `recomp_enter` now dumps registers for the first 200 enters under `BOLO_TRACE`, to
+  diff against the harness's per-enter register dump.
+
+**CURRENT FRONTIER — QB string-heap GC infinite loop (`res_017B81`/`res_017D33`).**
+After ~286K instructions the recomp wedges walking the QB string heap:
+`res_017B81` walks blocks via `si -= ds:[si-3]` until `ds:[si]==4`, but the heap head
+`ds:[0x4846]` (ds=`0x1E49`) is `0xFFFF` and the heap region is all `0xFF`, so `[si-3]`
+=`0xFFFF` makes `si += 1` and it scans forever (and the GC itself then writes `0xFFFF`
+into the heap, compounding it). **The harness/truth never enters this GC** (it reaches
+asset-loading), so we diverge *into* it.
+- The heap head is set to `0xFFFF` at **enter#57** by `mov word ds:[0x4846], si/di`
+  (three sites in `recomp_0012.c`); `si`/`di` was `0xFFFF` there — i.e. an earlier QB
+  string-heap **allocator** returned `0xFFFF` ("out of space"/uninitialized). Trace
+  *that* allocator next (why it yields `0xFFFF` instead of a real heap pointer).
+- CAVEAT on the trace diff: the Unicorn harness **stubs INT 21h** (e.g. AH=44h IOCTL
+  returns without setting DX), so recomp vs harness register traces legitimately
+  diverge at the first such INT 21h (≈enter#23, `res_01AE54`). Past that point the
+  harness is NOT faithful ground truth — to extend the diff, make the harness
+  implement the relevant INT 21h calls like `dos_compat.c` does. The heap-GC loop is
+  a *separate* real bug (no DOS would spin forever in string GC).
+
+Next concrete step: find why the QB heap allocator returns `0xFFFF` (is `ds=0x1E49`
+the right DGROUP? is the QB "string space top/bottom" pair at `ds:[0x4846±]` set up by
+startup, and did our snapshot capture it, or does init code we mis-lift set it?).
+
 ## ✅✅ THE NATIVE RECOMP BOOTS AND RUNS THE GAME
 
 `build/bolo.exe` loads the snapshot and executes the real QuickBASIC game:

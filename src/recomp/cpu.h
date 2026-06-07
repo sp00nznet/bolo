@@ -104,10 +104,14 @@ static inline uint16_t mem_read16(CPU *cpu, uint16_t seg, uint16_t off)
     return (uint16_t)cpu->mem[addr] | ((uint16_t)cpu->mem[addr + 1] << 8);
 }
 
+extern uint32_t g_watch_addr;     /* 0 = off; else linear addr to trace writes */
+void mem_watch_hit(uint32_t a, uint16_t val, int width);
+
 static inline void mem_write8(CPU *cpu, uint16_t seg, uint16_t off, uint8_t val)
 {
     uint32_t a = seg_off(seg, off);
     if (a >= EGA_LO && a < EGA_HI) { ega_write8(a - EGA_LO, val); return; }
+    if (g_watch_addr && a == g_watch_addr) mem_watch_hit(a, val, 8);
     cpu->mem[a] = val;
 }
 
@@ -119,6 +123,8 @@ static inline void mem_write16(CPU *cpu, uint16_t seg, uint16_t off, uint16_t va
         ega_write8(addr - EGA_LO + 1, (uint8_t)(val >> 8));
         return;
     }
+    if (g_watch_addr && (addr == g_watch_addr || addr + 1 == g_watch_addr))
+        mem_watch_hit(addr, val, 16);
     cpu->mem[addr] = (uint8_t)(val & 0xFF);
     cpu->mem[addr + 1] = (uint8_t)(val >> 8);
 }

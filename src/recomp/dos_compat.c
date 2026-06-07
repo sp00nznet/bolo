@@ -542,6 +542,8 @@ void bios_int10(CPU *cpu)
         cpu->bx = 0x0004;             /* BL=4: EGA w/ color display */
         return;
     case 0x00: /* Set video mode */
+        if (getenv("BOLO_TRACE"))
+            fprintf(stderr, "[int10] set video mode AL=%02X\n", cpu->al);
         /* Store current mode in BIOS data area */
         mem_write8(cpu, 0x0040, 0x0049, cpu->al);
         if (cpu->al == 0x13) {
@@ -735,6 +737,20 @@ void int_handler(CPU *cpu, uint8_t num)
         /* Most other interrupts are safe to ignore */
         break;
     }
+}
+
+/* ─── Timer-tick support (for firing the game's installed INT 1Ch/8 ISR) ─── */
+uint32_t dos_get_vector(unsigned n)
+{
+    return g_dos ? g_dos->ivt[n & 0xFF] : 0;
+}
+void dos_tick(CPU *cpu)            /* advance the BIOS tick at 0040:006C */
+{
+    uint32_t t = mem_read16(cpu, 0x0040, 0x006C) |
+                 ((uint32_t)mem_read16(cpu, 0x0040, 0x006E) << 16);
+    t++;
+    mem_write16(cpu, 0x0040, 0x006C, (uint16_t)t);
+    mem_write16(cpu, 0x0040, 0x006E, (uint16_t)(t >> 16));
 }
 
 /* ─── Port I/O ─── */

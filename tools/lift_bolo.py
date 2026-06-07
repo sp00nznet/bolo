@@ -149,6 +149,34 @@ def discover(image, detected, far_seg):
                     if t is not None and 0 <= t < N and t not in segbase:
                         segbase[t] = sb        # same segment as caller
                         changed = True
+                elif (ins.mnemonic in ("call", "jmp") and op and op.type == OpType.MEM
+                      and ins.seg_override == "cs"):
+                    # cs-relative indirect dispatch: `call/jmp word cs:[reg+disp]`.
+                    # This is a jump table at cs:disp whose word entries are routine
+                    # offsets within this segment -- often pointing into the *middle*
+                    # of an enclosing block (shared QB-runtime handlers). Register
+                    # each entry as a function start so the dispatcher can reach it.
+                    tbl = sb * 16 + (op.disp & 0xFFFF)
+                    for k in range(128):                # generous upper bound
+                        e = tbl + k * 2
+                        if e + 2 > N:
+                            break
+                        w = image[e] | (image[e + 1] << 8)
+                        if w >= 0x8000:                 # implausible offset -> table end
+                            break
+                        if w == 0:                      # null/padding slot, not a target
+                            continue
+                        t = sb * 16 + w
+                        if not (0 <= t < N):
+                            break
+                        # Skip targets whose first byte is an obvious non-opcode
+                        # (0x00) -- avoids registering data (e.g. embedded strings)
+                        # as spurious functions that the fallthrough fix walks into.
+                        if image[t] == 0x00:
+                            continue
+                        if t not in segbase:
+                            segbase[t] = sb
+                            changed = True
     return segbase
 
 

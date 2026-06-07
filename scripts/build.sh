@@ -34,5 +34,5 @@ for f in ${SRCS[@]}; do
   gcc -O1 -c $INC $SDLC "$f" -o "$o"
 done
 echo "linking..."
-gcc build/obj/*.o -o build/bolo.exe $SDLL
+gcc build/obj/*.o -o build/bolo.exe $SDLL -Wl,--stack,0x8000000
 echo "built build/bolo.exe"

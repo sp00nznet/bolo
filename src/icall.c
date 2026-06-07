@@ -44,17 +44,88 @@ static void (*lookup(unsigned long image_off))(CPU*)
 
 CPU *g_dbg_cpu = NULL;
 long g_enter_n = 0;
+void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off);   /* fwd decl */
+extern uint32_t dos_get_vector(unsigned n);
+extern void dos_tick(CPU *cpu);
+static int g_in_timer = 0;
+long g_timer_fires = 0;
+
+/* Periodically fire the game's installed timer ISR (INT 1Ch / IRQ0 INT 8) so the
+ * frame-timing wait loops advance. The lifter renders IRET as a bare return, so
+ * we just dispatch to the installed vector. */
+static void maybe_fire_timer(void)
+{
+    if (g_in_timer || !g_dbg_cpu) return;
+    if (g_enter_n % 150 != 0) return;
+    g_in_timer = 1;
+    dos_tick(g_dbg_cpu);
+    uint32_t v = dos_get_vector(0x1C);
+    if (v) { g_timer_fires++; recomp_dispatch(g_dbg_cpu, (uint16_t)(v >> 16), (uint16_t)v); }
+    v = dos_get_vector(0x08);
+    if (v) recomp_dispatch(g_dbg_cpu, (uint16_t)(v >> 16), (uint16_t)v);
+    g_in_timer = 0;
+}
+
+unsigned long g_last_enter = 0;          /* most recent function entered */
+unsigned long g_enter_ring[64];          /* recent enter history (call path) */
+int g_enter_ring_pos = 0;
+
+uint32_t g_watch_addr = 0;               /* linear addr to trace writes (0=off) */
+static long g_watch_hits = 0;
+void mem_watch_hit(uint32_t a, uint16_t val, int width)
+{
+    if (g_watch_hits++ < 40)
+        fprintf(stderr, "[watch] write%d 0x%05lX = 0x%0*X  by res_%06lX (enter#%ld)\n",
+                width, (unsigned long)a, width == 8 ? 2 : 4, val,
+                g_last_enter, g_enter_n);
+    /* BOLO_WATCH_FF: stop and dump the call path the first time the watched word
+     * is written 0xFFFF (the heap-corruption value) so we can find the culprit. */
+    if (getenv("BOLO_WATCH_FF") && (val & 0xFF) == 0xFF && width == 16) {
+        fprintf(stderr, "\n*** heap-corrupt write 0x%05lX=0x%04X enter#%ld; call path:\n",
+                (unsigned long)a, val, g_enter_n);
+        for (int i = 0; i < 24; i++) {
+            int idx = (g_enter_ring_pos - 1 - i) & 63;
+            if (g_enter_ring[idx]) fprintf(stderr, "    res_%06lX\n", g_enter_ring[idx]);
+        }
+        _Exit(43);
+    }
+}
+
 void recomp_enter(unsigned long addr)
 {
-    if (g_trace && g_enter_n < 4000)
-        fprintf(stderr, "E %06lX\n", addr);
+    if (g_trace && (g_enter_n < 4000 || g_enter_n % 500 == 0)) {
+        if (g_dbg_cpu && g_enter_n < 200) {
+            CPU *c = g_dbg_cpu;
+            fprintf(stderr, "E %06lX ax=%04X bx=%04X cx=%04X dx=%04X si=%04X "
+                    "di=%04X bp=%04X ds=%04X es=%04X\n", addr, c->ax, c->bx,
+                    c->cx, c->dx, c->si, c->di, c->bp, c->ds, c->es);
+        } else {
+            fprintf(stderr, "E %06lX\n", addr);
+        }
+    }
     g_enter_n++;
+    g_last_enter = addr;
+    g_enter_ring[g_enter_ring_pos++ & 63] = addr;
+    maybe_fire_timer();
     if (g_enter_n == 3000000) {
         ega_dump("work/ega_planes.bin");
         if (g_dbg_cpu) {                        /* also dump text screen (B800) */
             FILE *t = fopen("work/text.bin", "wb");
             if (t) { fwrite(&g_dbg_cpu->mem[0xB8000], 1, 4000, t); fclose(t); }
         }
+        fprintf(stderr, "[stats] dispatch calls=%ld misses=%ld\n",
+                g_dispatch_calls, g_dispatch_misses);
+        fprintf(stderr, "[timer] fires=%ld  ivt1C=%08X ivt08=%08X ivt09=%08X\n",
+                g_timer_fires, dos_get_vector(0x1C), dos_get_vector(0x08),
+                dos_get_vector(0x09));
+        fprintf(stderr, "[loop] last dispatched image offsets:\n");
+        for (int i = 0; i < 12; i++) {
+            int idx = (g_ring_pos - 1 - i) & 31;
+            if (g_ring[idx]) fprintf(stderr, "    res_%06lX\n", g_ring[idx]);
+        }
+        if (g_dbg_cpu)
+            fprintf(stderr, "[regs] ds=%04X es=%04X cs=%04X\n",
+                    g_dbg_cpu->ds, g_dbg_cpu->es, g_dbg_cpu->cs);
         _Exit(0);
     }
 }
