@@ -109,8 +109,9 @@ void recomp_enter(unsigned long addr)
     if (getenv("BOLO_HEAP") && g_dbg_cpu) {
         CPU *c = g_dbg_cpu;
         if (addr == 0x0146DF)       /* QB init-routine dispatcher */
-            fprintf(stderr, "[heap] init-dispatch res_0146DF enter#%ld ds=%04X si=%04X cnt=%04X\n",
-                    g_enter_n, c->ds, c->si, c->mem[(uint32_t)c->ds*16+c->si]|(c->mem[(uint32_t)c->ds*16+c->si+1]<<8));
+            fprintf(stderr, "[heap] init-dispatch res_0146DF enter#%ld ds=%04X si=%04X cnt=%04X DF=%d\n",
+                    g_enter_n, c->ds, c->si, c->mem[(uint32_t)c->ds*16+c->si]|(c->mem[(uint32_t)c->ds*16+c->si+1]<<8),
+                    (c->flags & FLAG_DF) ? 1 : 0);
         else if (addr == 0x0173FA)  /* block B: string-space bounds setup */
             fprintf(stderr, "[heap] block-B res_0173FA enter#%ld ds=%04X\n", g_enter_n, c->ds);
         else if (addr == 0x017D7C)  /* heap initializer */

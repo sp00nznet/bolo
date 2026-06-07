@@ -80,7 +80,8 @@ def main():
         uc.reg_write(r, v)
 
     st = {"n": 0, "last_cs": None, "trans": 0}
-    NMAX = 30_000_000
+    import os as _osn
+    NMAX = int(_osn.environ.get('UNI_NMAX','30000000'))
     QB_ENTRY = (LOAD_SEG + 0x2011)      # the QB startup segment (post-PKLITE)
 
     ENTER_TRACE = "--enter-trace" in sys.argv
@@ -101,10 +102,23 @@ def main():
             tbl = struct.unpack("<8H", uc.mem_read(ds*16+si, 16))
             print(f"  [HEAP] IP {address:#07x} cs:ip={cs:04x}:{ip:04x} ds={ds:04x} si={si:04x} "
                   f"cx={cx:04x} ds:[si..]={['%04x'%w for w in tbl]} prev={st.get('prev',0):#07x}")
-        if HEAPT and st.get("at_entry") and st.get("prev") == 0x146E5:
-            # the instruction AFTER the init-dispatcher's `call word ds:[si]` is the
-            # resolved init-routine entry -- collect them all (image offsets).
-            st.setdefault("inittgts", set()).add(address)
+        if HEAPT and st.get("at_entry"):
+            # General call-target collector: if the previous instruction was a CALL
+            # (any form), the current address is its target. Collect them all so the
+            # recomp can force them as function starts (covers indirect calls through
+            # DGROUP routine tables -- init/handler/heap registration -- whose targets
+            # land mid-function and are otherwise unreachable).
+            p = st.get("prev", 0)
+            i = p
+            while i < p + 4 and uc.mem_read(i, 1)[0] in (0x26,0x2E,0x36,0x3E,0x64,0x65,0x66,0x67,0xF2,0xF3):
+                i += 1
+            op = uc.mem_read(i, 1)[0]
+            is_call = op in (0xE8, 0x9A)
+            if op == 0xFF:
+                reg = (uc.mem_read(i + 1, 1)[0] >> 3) & 7
+                is_call = reg in (2, 3)
+            if is_call:
+                st.setdefault("calltgts", {})[address] = uc.reg_read(UC_X86_REG_CS)
         st["prev"] = address
         cs = uc.reg_read(UC_X86_REG_CS)
         if cs != st["last_cs"]:
@@ -189,6 +203,15 @@ def main():
                 if len(st["opens"]) >= (999 if HEAPT else 3):
                     st["stop"] = "reached asset loading"; uc.emu_stop()
                 return
+            # Faithful INT 21h ONLY after the real entry (during PKLITE+QB startup we
+            # must keep the known-good stub behavior that reaches the entry).
+            if st.get("at_entry"):
+                if ah == 0x44:                   # IOCTL — match dos_compat.c
+                    if (ax & 0xFF) == 0:
+                        uc.reg_write(UC_X86_REG_DX, 0x80D3)   # char device (CON)
+                    cf(False); return
+                if ah == 0x62:                   # get PSP -> BX (dos_compat: 0x00F0)
+                    uc.reg_write(UC_X86_REG_BX, 0x00F0); cf(False); return
             cf(False); return                    # other INT 21h -> succeed-ish
         if intno == 0x20:
             st["stop"] = "INT 20h"; uc.emu_stop(); return
@@ -218,10 +241,11 @@ def main():
         pc = (cs << 4) + ip
         print("  bytes@pc:", bytes(uc.mem_read(pc, 16)).hex(' '))
         return
-    if st.get("inittgts"):
-        tg = sorted(st["inittgts"])
-        print(f"\nINIT-ROUTINE TARGETS ({len(tg)}) via call word ds:[si] @0x146E5:")
-        print(" ".join(f"0x{t:05X}" for t in tg))
+    if st.get("calltgts"):
+        ct = st["calltgts"]   # {linear_addr: cs}
+        import json as _json
+        open("work/calltgts.json", "w").write(_json.dumps({str(a): ct[a] for a in sorted(ct)}))
+        print(f"\nCALL TARGETS ({len(ct)}) collected -> work/calltgts.json (addr:cs)")
     print(f"\nstopped: {st.get('stop')} after {st['n']} insns, {st['trans']} CS transitions")
     if "qb_entry" in st:
         print("QB REAL ENTRY:", st["qb_entry"])

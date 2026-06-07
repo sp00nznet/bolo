@@ -44,13 +44,25 @@ FUNC_RE = re.compile(
 ENTRY = 0x1B484          # real program entry: runtime 1AB4:0944 -> snapshot linear
 ENTRY_SEG = 0x1AB4       # caller segment for the entry (for near-call resolution)
 MAXLEN = 0x2000          # cap a region scan so we don't run deep into data
-# QB-runtime init routines reached via `call word ds:[si]` (the init dispatcher at
-# image 0x146E5). Their targets are near offsets in segment 0x1283 and several land
-# in the MIDDLE of other discovered functions (e.g. 0x173FA / 0x17422 inside the
-# merged res_0173CA), so without forcing them as starts the dispatcher misses them
-# and the QB string-space/heap init never runs (-> string GC loops on a bad heap).
-# Captured from the Unicorn ground truth (tools/uni_original.py UNI_HEAPTRACE=0x146DF).
-INIT_ROUTINES = {0x12EFD, 0x14695, 0x16D15, 0x16EF1, 0x173FA, 0x17422, 0x19BA4}
+# Call targets captured from the Unicorn ground truth (work/calltgts.json, a
+# {linear_addr: cs} map produced by `UNI_HEAPTRACE=0x1 UNI_NMAX=... uni_original.py`).
+# The QB runtime reaches many routines via INDIRECT calls through DGROUP routine
+# tables (init/handler/heap registration); their targets often land in the MIDDLE of
+# other discovered functions (e.g. the init-table patcher 0x1B72E, or 0x173FA inside
+# the merged res_0173CA). Without forcing them as function starts the dispatcher
+# misses them and the QB string-space/heap init never runs (-> string GC loops on a
+# bad heap). Force each as a start with its ground-truth segment (cs).
+import os as _os, json as _json
+CALLTGT_SEG = {}     # {linear_addr: segbase}
+# committed copy (tools/calltgts.json); regenerate via UNI_HEAPTRACE=0x1 uni_original.py
+for _ctf in (_os.path.join(_os.path.dirname(__file__), "calltgts.json"),
+             _os.path.join(_os.path.dirname(__file__), "..", "work", "calltgts.json")):
+    if _os.path.exists(_ctf):
+        CALLTGT_SEG = {int(a): int(c) for a, c in _json.load(open(_ctf)).items()}
+        break
+# Fallback subset (used if calltgts.json hasn't been regenerated) -- all seg 0x1283.
+INIT_ROUTINES = set(CALLTGT_SEG) or {0x12EFD, 0x14695, 0x16D15, 0x16EF1,
+                                     0x173FA, 0x17422, 0x19BA4}
 FORCE_STARTS = {ENTRY} | INIT_ROUTINES   # seed discovery from the real entry
 
 
@@ -200,8 +212,8 @@ def main():
     segbase = discover(image, detected, far_seg)
     for fs in FORCE_STARTS:                 # trampoline continuations
         segbase.setdefault(fs, segbase_for(fs, sorted(far_seg.items())))
-    for fs in INIT_ROUTINES:               # invoked near from segment 0x1283
-        segbase[fs] = 0x1283
+    for fs in INIT_ROUTINES:               # force ground-truth segment per target
+        segbase[fs] = CALLTGT_SEG.get(fs, 0x1283)
     starts = sorted(segbase)
     n_detected = len(detected)
     funcs = []
