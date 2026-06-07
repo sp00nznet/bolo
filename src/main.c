@@ -17,6 +17,20 @@
 #include "cpu.h"
 #include "recomp/gen/bolo_recomp.h"
 #include "recomp/gen/snapshot_regs.h"
+#include "hal/input.h"
+
+/* scripted keystrokes fed when the game polls for input (so it advances past
+ * prompts/menus and draws). One key pushed per poll. */
+static const unsigned char g_keys[] = " \r \rS1\r \r ";
+static int g_key_i = 0;
+static void feed_keys(void *ctx, void *ds, const void *cpu)
+{
+    (void)ctx; (void)cpu;
+    DosState *d = (DosState *)ds;
+    unsigned char c = g_keys[g_key_i];
+    if (c) g_key_i++; else c = ' ';      /* after the script, keep tapping space */
+    keyboard_push(&d->keyboard, 0x39, c);
+}
 
 extern unsigned long g_load_base;
 extern int g_trace;
@@ -64,6 +78,7 @@ int main(int argc, char **argv)
      * area). Without this, INT 21h handlers deref a NULL g_dos. */
     static DosState dos;
     dos_init(&dos, &cpu, "original");
+    dos.poll_events = feed_keys;               /* feed scripted keystrokes */
     extern CPU *g_dbg_cpu; g_dbg_cpu = &cpu;   /* for debug screen dumps */
 
     fprintf(stderr, "dispatching real entry %04X:%04X (image 0x%05lX)\n",

@@ -83,6 +83,69 @@ static void dos_close_handle(int handle)
     }
 }
 
+/* ─── DOS memory arena (MCB chain) ─── */
+#define MCB_M 0x4D   /* member block (more follow) */
+#define MCB_Z 0x5A   /* last block in the chain    */
+static uint16_t g_first_mcb = 0;
+
+static void mcb_set(CPU *cpu, uint16_t mcb, uint8_t type, uint16_t owner, uint16_t size)
+{
+    mem_write8(cpu, mcb, 0, type);
+    mem_write16(cpu, mcb, 1, owner);
+    mem_write16(cpu, mcb, 3, size);
+}
+
+static void arena_init(CPU *cpu, uint16_t psp, uint16_t memtop)
+{
+    uint16_t mcb = (uint16_t)(psp - 1);                 /* MCB precedes the block */
+    g_first_mcb = mcb;
+    mcb_set(cpu, mcb, MCB_Z, psp, (uint16_t)(memtop - psp));
+    /* list-of-lists shim: AH=52h returns ES:BX=80:02; [80:00] = first MCB seg */
+    mem_write16(cpu, 0x0080, 0x0000, mcb);
+}
+
+/* resize the block whose data starts at `seg` to `paras`; split off a free
+ * remainder if it shrank. returns 0 on ok. */
+static int arena_resize(CPU *cpu, uint16_t seg, uint16_t paras)
+{
+    uint16_t mcb = (uint16_t)(seg - 1);
+    uint8_t  type = mem_read8(cpu, mcb, 0);
+    uint16_t cur = mem_read16(cpu, mcb, 3);
+    if (type != MCB_M && type != MCB_Z) return -1;
+    if (paras < cur) {                                  /* shrink -> free remainder */
+        uint16_t rem_mcb = (uint16_t)(seg + paras);
+        mcb_set(cpu, rem_mcb, type, 0 /*free*/, (uint16_t)(cur - paras - 1));
+        mcb_set(cpu, mcb, MCB_M, mem_read16(cpu, mcb, 1), paras);
+    } else {
+        mem_write16(cpu, mcb, 3, paras);                /* grow (we always have room) */
+    }
+    return 0;
+}
+
+/* allocate `paras` paragraphs from the first free block big enough.
+ * returns the data segment, or 0 if none. */
+static uint16_t arena_alloc(CPU *cpu, uint16_t psp, uint16_t paras)
+{
+    uint16_t mcb = g_first_mcb;
+    for (;;) {
+        uint8_t type = mem_read8(cpu, mcb, 0);
+        uint16_t owner = mem_read16(cpu, mcb, 1);
+        uint16_t size = mem_read16(cpu, mcb, 3);
+        if (owner == 0 && size >= paras) {              /* free & big enough */
+            if (size > paras + 1) {                     /* split */
+                uint16_t nxt = (uint16_t)(mcb + 1 + paras);
+                mcb_set(cpu, nxt, type, 0, (uint16_t)(size - paras - 1));
+                mcb_set(cpu, mcb, MCB_M, psp, paras);
+            } else {
+                mem_write16(cpu, mcb, 1, psp);          /* take whole block */
+            }
+            return (uint16_t)(mcb + 1);
+        }
+        if (type == MCB_Z) return 0;
+        mcb = (uint16_t)(mcb + 1 + size);
+    }
+}
+
 /* ─── Initialization ─── */
 
 void dos_init(DosState *ds, CPU *cpu, const char *game_dir)
@@ -114,7 +177,13 @@ void dos_init(DosState *ds, CPU *cpu, const char *game_dir)
     /* Screen columns at 0040:004A */
     mem_write16(cpu, 0x0040, 0x004A, 80);
 
-    ds->mem_top = 0x9000;  /* Top of available conventional memory */
+    ds->mem_top = 0x9FFF;  /* Top of available conventional memory */
+
+    /* Build a valid DOS memory-arena (MCB chain) so the QuickBASIC runtime's
+     * arena walk passes (otherwise it aborts with "DOS memory-arena error").
+     * PSP is at segment 0xF0 (load module at 0x100); one 'Z' block owned by the
+     * PSP spans PSP..mem_top. */
+    arena_init(cpu, 0x00F0, ds->mem_top);
 
     printf("[DOS] Initialized with game dir: %s\n", game_dir);
 }
@@ -146,9 +215,12 @@ void dos_int21(CPU *cpu)
         break;
     }
 
-    case 0x02: /* Character output */
-        /* Silently consume - game text goes via INT 10h to VGA memory */
+    case 0x02: { /* Character output -> teletype to text buffer */
+        uint8_t sa = cpu->ah, sal = cpu->al;
+        cpu->ah = 0x0E; cpu->al = cpu->dl; bios_int10(cpu);
+        cpu->ah = sa; cpu->al = sal;
         break;
+    }
 
     case 0x08: /* Character input without echo */
     case 0x07: {
@@ -162,6 +234,24 @@ void dos_int21(CPU *cpu)
         cpu->al = (uint8_t)(key & 0xFF);
         break;
     }
+
+    case 0x06: /* Direct console I/O */
+        if (cpu->dl == 0xFF) {                 /* input (non-blocking) */
+            if (g_dos->poll_events)
+                g_dos->poll_events(g_dos->platform_ctx, g_dos, cpu);
+            if (keyboard_available(&g_dos->keyboard)) {
+                cpu->al = (uint8_t)(keyboard_read(&g_dos->keyboard) & 0xFF);
+                cpu->flags &= ~FLAG_ZF;        /* key available */
+            } else {
+                cpu->al = 0;
+                cpu->flags |= FLAG_ZF;         /* no key ready */
+            }
+        } else {                               /* output char in DL -> teletype */
+            uint8_t sa = cpu->ah, sal = cpu->al;
+            cpu->ah = 0x0E; cpu->al = cpu->dl; bios_int10(cpu);
+            cpu->ah = sa; cpu->al = sal;
+        }
+        break;
 
     case 0x09: { /* Print string (terminated by '$') */
         /* Output to text mode video memory via INT 10h teletype */
@@ -386,29 +476,28 @@ void dos_int21(CPU *cpu)
         break;
     }
 
-    case 0x48: { /* Allocate memory */
-        /* BX = paragraphs requested */
-        uint16_t paras = cpu->bx;
-        if (g_dos->mem_top + paras < 0xA000) {
-            cpu->ax = g_dos->mem_top;
-            g_dos->mem_top += paras;
-            cpu->flags &= ~FLAG_CF;
-        } else {
-            cpu->ax = 8;  /* Insufficient memory */
-            cpu->bx = (uint16_t)(0xA000 - g_dos->mem_top);
-            cpu->flags |= FLAG_CF;
-        }
+    case 0x48: { /* Allocate memory (BX paragraphs) via the arena */
+        uint16_t seg = arena_alloc(cpu, 0x00F0, cpu->bx);
+        if (seg) { cpu->ax = seg; cpu->flags &= ~FLAG_CF; }
+        else     { cpu->ax = 8; cpu->flags |= FLAG_CF; }  /* insufficient memory */
         break;
     }
 
-    case 0x49: /* Free memory */
-        /* ES = segment to free - simplified, just succeed */
+    case 0x49: /* Free memory (ES = block) */
+        mem_write16(cpu, (uint16_t)(cpu->es - 1), 1, 0);  /* owner = free */
         cpu->flags &= ~FLAG_CF;
         break;
 
-    case 0x4A: /* Resize memory block */
-        /* ES = segment, BX = new size in paragraphs */
-        cpu->flags &= ~FLAG_CF;  /* Always succeed */
+    case 0x4A: /* Resize memory block (ES = block, BX = new paragraphs) */
+        if (arena_resize(cpu, cpu->es, cpu->bx) == 0) {
+            cpu->flags &= ~FLAG_CF;
+        } else {
+            cpu->ax = 9; cpu->flags |= FLAG_CF;           /* invalid block */
+        }
+        break;
+
+    case 0x52: /* Get list of lists -> ES:BX; [ES:BX-2] = first MCB segment */
+        cpu->es = 0x0080; cpu->bx = 0x0002;
         break;
 
     case 0x44: /* IOCTL */
@@ -422,7 +511,7 @@ void dos_int21(CPU *cpu)
         break;
 
     case 0x62: /* Get PSP segment */
-        cpu->bx = 0x0100;  /* PSP at segment 0100h */
+        cpu->bx = 0x00F0;  /* PSP at segment 00F0h (load module at 0100h) */
         break;
 
     default:
@@ -500,6 +589,7 @@ void bios_int10(CPU *cpu)
 
     case 0x0E: /* Teletype output */
         /* Write character and advance cursor */ {
+        if (getenv("BOLO_TRACE")) { fputc(cpu->al ? cpu->al : ' ', stderr); }
         uint8_t col = mem_read8(cpu, 0x0040, 0x0050);
         uint8_t row = mem_read8(cpu, 0x0040, 0x0051);
         if (cpu->al == 0x0D) {
