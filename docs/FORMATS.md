@@ -89,7 +89,38 @@ Tiny. Possibly a high-score table, registration record, or an XOR/ADD-obfuscated
 string blob. **TODO:** check for a simple cipher (running XOR / byte add) once the
 loader is found.
 
-## `BOLO3.JFT` — structured table (font and/or puzzles)
+## ★ Reference: Silas S. Brown's Bolo walkthrough + format notes
+
+https://ssb22.user.srcf.net/game/bolo.html — documents Bolo Adventures I/II/III
+(William Soleau) mechanics AND the level-data format. Key facts:
+
+- **Grid:** 22×15 (Bolo III: 22×16). Player pushes (never pulls) objects.
+- **Object rules:** balls/blocks are pushable and stop at walls/obstacles; water/
+  rivers flow and can reverse (dry a square by pushing a ball/block onto it);
+  lasers are beams ("all point right" in I/II) blocked by balls/blocks; buttons/
+  dials unlock areas or reverse water; robots/electric-worms are timed moving
+  hazards; stairs are the exit.
+- **Level data format:** stored *obfuscated* in the `.ov*` files — **24 bytes per
+  line, 15 (III: 16) rows per floor, XOR-encrypted with the ASCII floor number +
+  the key `"PASS"`**, cells encoded as letters A–Z (blank, metal brick, green
+  block, ball, laser, sizzle, robot, river, redirector, …).
+- **Scoring:** 1000 + 13/ball + 18/green-block − 1 per 10 arrow presses −
+  2/worm-teleport, min 0.
+
+This is the spec for decoding the puzzles and for validating the recompiled
+game logic (and a head start on any clean reimplementation).
+
+## Level-data location in Bolo III (open lead)
+
+Per the reference the levels are XOR'd (floor#+`PASS`, 24 bytes/line, A–Z codes).
+Tried that scheme over every `.OV*`/`.JFT` file — no clean A–Z grid emerged, so
+Bolo **III** likely differs from I/II: the puzzles are probably in the EXE's
+DGROUP (QuickBASIC `DATA` compiled in) or an OVx with a different key. `BOLO3.JFT`
+is **not** the levels — it's a bitmap font (see below). Next: search the
+decompressed image (`work/snapshot.bin`) for the 22×16 grid structures / the A–Z
+object table, cross-referenced with the level-loader code.
+
+## `BOLO3.JFT` — bitmap FONT (not the levels)
 
 ```
 0C 00 01 00 FE 00 00 00 10 00 00 00 00 00 A8 00 ...
