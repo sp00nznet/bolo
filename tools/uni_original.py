@@ -144,6 +144,7 @@ def main():
         # at the real entry: either snapshot+stop, or begin function-entry tracing
         if "qb_entry" in st and cs == st["qb_entry"][0] and not st.get("at_entry"):
             st["at_entry"] = True
+            arena_init()                       # build the DOS MCB arena (faithful DOS)
             if HEAPT:
                 # heap-trace mode: just run past the entry (no snapshot/no enter cap)
                 print(f"  [entry] reached; running with HEAPTRACE {sorted(HEAPT)}")
@@ -168,6 +169,12 @@ def main():
                 st["ecount"] += 1
                 if st["ecount"] >= 4000:
                     st["stop"] = "enter-trace done"; uc.emu_stop(); return
+        if st.get("at_entry") and st["n"] % 4000000 == 0:
+            cs = uc.reg_read(UC_X86_REG_CS); si = uc.reg_read(UC_X86_REG_SI)
+            tbl = struct.unpack("<8H", uc.mem_read(0x1E49*16+0x44F0, 16))
+            hd = struct.unpack("<H", uc.mem_read(0x1E49*16+0x4846, 2))[0]
+            print(f"  [pc] n={st['n']//1000000}M cs:ip={cs:04x}:{uc.reg_read(UC_X86_REG_IP):04x} "
+                  f"si={si:04x} head[4846]={hd:04x} inittbl={['%04x'%w for w in tbl]}")
         if st["n"] > NMAX:
             uc.emu_stop()
 
@@ -175,12 +182,90 @@ def main():
         fl = uc.reg_read(UC_X86_REG_EFLAGS)
         uc.reg_write(UC_X86_REG_EFLAGS, (fl | 1) if set_ else (fl & ~1))
 
+    # ── Faithful DOS layer (mirrors src/recomp/dos_compat.c) — applied only AFTER
+    # the real entry, so PKLITE+QB startup still use the known-good stubs above.
+    def rd8(s, o):  return uc.mem_read(s * 16 + o, 1)[0]
+    def rd16(s, o): return struct.unpack("<H", uc.mem_read(s * 16 + o, 2))[0]
+    def wr16(s, o, v): uc.mem_write(s * 16 + o, struct.pack("<H", v & 0xFFFF))
+    def wr8(s, o, v):  uc.mem_write(s * 16 + o, bytes([v & 0xFF]))
+    def setreg16(r, v): uc.reg_write(r, v & 0xFFFF)
+    PSP = PSP_SEG; MEMTOP = 0x9FFF
+    def mcb_set(mcb, ty, owner, size):
+        wr8(mcb, 0, ty); wr16(mcb, 1, owner); wr16(mcb, 3, size)
+    def arena_init():
+        mcb = PSP - 1
+        mcb_set(mcb, 0x5A, PSP, MEMTOP - PSP)     # single free-ish Z block
+        wr16(0x0080, 0x0000, mcb)
+        st["first_mcb"] = mcb
+    def arena_alloc(paras):
+        mcb = st["first_mcb"]
+        while True:
+            ty = rd8(mcb, 0); owner = rd16(mcb, 1); size = rd16(mcb, 3)
+            if owner == 0 and size >= paras:
+                if size > paras + 1:
+                    nxt = (mcb + 1 + paras) & 0xFFFF
+                    mcb_set(nxt, ty, 0, size - paras - 1); mcb_set(mcb, 0x4D, PSP, paras)
+                else:
+                    wr16(mcb, 1, PSP)
+                return (mcb + 1) & 0xFFFF
+            if ty == 0x5A:
+                return 0
+            mcb = (mcb + 1 + size) & 0xFFFF
+    def arena_resize(seg, paras):
+        mcb = (seg - 1) & 0xFFFF
+        ty = rd8(mcb, 0); cur = rd16(mcb, 3)
+        if ty not in (0x4D, 0x5A): return -1
+        if paras < cur:
+            rem = (seg + paras) & 0xFFFF
+            mcb_set(rem, ty, 0, cur - paras - 1); mcb_set(mcb, 0x4D, rd16(mcb, 1), paras)
+        else:
+            wr16(mcb, 3, paras)
+        return 0
+    R = dict(AX=UC_X86_REG_AX, BX=UC_X86_REG_BX, CX=UC_X86_REG_CX, DX=UC_X86_REG_DX,
+             ES=UC_X86_REG_ES, DS=UC_X86_REG_DS, SI=UC_X86_REG_SI, DI=UC_X86_REG_DI)
+    def faithful21(ah):
+        al = uc.reg_read(R['AX']) & 0xFF
+        if ah == 0x30: setreg16(R['AX'], 0x0005); return True            # DOS 5.0
+        if ah == 0x25:                                                   # set vector
+            n = al; ds = uc.reg_read(R['DS']); dx = uc.reg_read(R['DX'])
+            st.setdefault("ivt", {})[n] = (ds << 16) | dx; return True
+        if ah == 0x35:                                                   # get vector
+            v = st.get("ivt", {}).get(al, 0)
+            setreg16(R['ES'], v >> 16); setreg16(R['BX'], v & 0xFFFF); return True
+        if ah == 0x48:                                                   # allocate
+            seg = arena_alloc(uc.reg_read(R['BX']))
+            if seg: setreg16(R['AX'], seg); cf(False)
+            else:   setreg16(R['AX'], 8); cf(True)
+            return True
+        if ah == 0x49:                                                   # free
+            wr16((uc.reg_read(R['ES']) - 1) & 0xFFFF, 1, 0); cf(False); return True
+        if ah == 0x4A:                                                   # resize
+            if arena_resize(uc.reg_read(R['ES']), uc.reg_read(R['BX'])) == 0: cf(False)
+            else: setreg16(R['AX'], 9); cf(True)
+            return True
+        if ah == 0x52:                                                   # list of lists
+            setreg16(R['ES'], 0x0080); setreg16(R['BX'], 0x0002); return True
+        if ah == 0x44:                                                   # IOCTL
+            if al == 0: setreg16(R['DX'], 0x80D3)
+            cf(False); return True
+        if ah == 0x62:                                                   # get PSP
+            setreg16(R['BX'], PSP); return True
+        if ah in (0x06, 0x0B):                                           # console: no key
+            if ah == 0x0B: setreg16(R['AX'], (uc.reg_read(R['AX']) & 0xFF00) | 0x00)
+            elif (uc.reg_read(R['DX']) & 0xFF) == 0xFF:
+                fl = uc.reg_read(UC_X86_REG_EFLAGS); uc.reg_write(UC_X86_REG_EFLAGS, fl | 0x40)
+                setreg16(R['AX'], uc.reg_read(R['AX']) & 0xFF00)
+            cf(False); return True
+        return False
+
     handles = {}
     def hook_intr(uc, intno, _):
         ax = uc.reg_read(UC_X86_REG_AX); ah = (ax >> 8) & 0xFF
         if intno == 0x21:
             if ah == 0x4C:
                 st["stop"] = f"INT21/4C exit {ax & 0xFF}"; uc.emu_stop(); return
+            if st.get("at_entry") and faithful21(ah):     # faithful DOS post-entry
+                return
             if ah == 0x30:
                 uc.reg_write(UC_X86_REG_AX, 0x0005); return
             if ah in (0x4A, 0x48, 0x49, 0x25, 0x35, 0x1A):
