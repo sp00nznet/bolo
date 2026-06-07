@@ -108,7 +108,22 @@ void recomp_enter(unsigned long addr)
     g_enter_ring[g_enter_ring_pos++ & 63] = addr;
     if (getenv("BOLO_HEAP") && g_dbg_cpu) {
         CPU *c = g_dbg_cpu;
-        if (addr == 0x0146DF)       /* QB init-routine dispatcher */
+        if (addr == 0x013BBF) {     /* line drawer: dump endpoints + clip box */
+            static int n=0;
+            if (n++ < 4) {
+                uint32_t b=(uint32_t)c->ds*16;
+                fprintf(stderr, "[draw] res_013BBF enter#%ld ax=%04X bx=%04X cx=%04X dx=%04X | "
+                    "clipbox[47EB..47F1]=%04X %04X %04X %04X\n", g_enter_n, c->ax,c->bx,c->cx,c->dx,
+                    c->mem[b+0x47EB]|(c->mem[b+0x47EC]<<8), c->mem[b+0x47ED]|(c->mem[b+0x47EE]<<8),
+                    c->mem[b+0x47EF]|(c->mem[b+0x47F0]<<8), c->mem[b+0x47F1]|(c->mem[b+0x47F2]<<8));
+            }
+        }
+        else if (addr == 0x019AD2) { /* clip outcode: watch the point converge */
+            static int n=0;
+            if (n++ < 24)
+                fprintf(stderr, "[clip] res_019AD2 #%d cx=%04X dx=%04X\n", n, c->cx, c->dx);
+        }
+        else if (addr == 0x0146DF)  /* QB init-routine dispatcher */
             fprintf(stderr, "[heap] init-dispatch res_0146DF enter#%ld ds=%04X si=%04X cnt=%04X DF=%d\n",
                     g_enter_n, c->ds, c->si, c->mem[(uint32_t)c->ds*16+c->si]|(c->mem[(uint32_t)c->ds*16+c->si+1]<<8),
                     (c->flags & FLAG_DF) ? 1 : 0);

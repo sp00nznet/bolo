@@ -220,8 +220,17 @@ def main():
     uc.hook_add(UC_HOOK_CODE, hook_code)
     uc.hook_add(UC_HOOK_INTR, hook_intr)
 
-    WATCH = int(os.environ.get("UNI_WATCH", "0"), 0) if "os" in dir() else 0
     import os as _os
+    if _os.environ.get("UNI_EGA"):       # detect EGA framebuffer writes (drawing)
+        def hook_ega(uc, access, address, size, value, _):
+            if 0xA0000 <= address < 0xB0000 and st.get("at_entry"):
+                st["ega"] = st.get("ega", 0) + 1
+                if st["ega"] <= 3:
+                    cs = uc.reg_read(UC_X86_REG_CS); ip = uc.reg_read(UC_X86_REG_IP)
+                    print(f"  [EGA-W] {address:#07x} <= {value:#x} by {cs:04x}:{ip:04x} n={st['n']}")
+        uc.hook_add(UC_HOOK_MEM_WRITE, hook_ega)
+
+    WATCH = int(os.environ.get("UNI_WATCH", "0"), 0) if "os" in dir() else 0
     WATCH = int(_os.environ.get("UNI_WATCH", "0"), 0)
     if WATCH and st.get is not None:
         def hook_mw(uc, access, address, size, value, _):
@@ -246,7 +255,11 @@ def main():
         import json as _json
         open("work/calltgts.json", "w").write(_json.dumps({str(a): ct[a] for a in sorted(ct)}))
         print(f"\nCALL TARGETS ({len(ct)}) collected -> work/calltgts.json (addr:cs)")
-    print(f"\nstopped: {st.get('stop')} after {st['n']} insns, {st['trans']} CS transitions")
+    _fcs = uc.reg_read(UC_X86_REG_CS); _fip = uc.reg_read(UC_X86_REG_IP)
+    print(f"\nstopped: {st.get('stop')} after {st['n']} insns, {st['trans']} CS transitions; "
+          f"final cs:ip={_fcs:04x}:{_fip:04x} lin {(_fcs<<4)+_fip:#07x}")
+    if "ega" in st:
+        print(f"EGA framebuffer writes (A000): {st['ega']}")
     if "qb_entry" in st:
         print("QB REAL ENTRY:", st["qb_entry"])
 
