@@ -196,6 +196,10 @@ def discover(image, detected, far_seg):
                         if t not in segbase:
                             segbase[t] = sb
                             changed = True
+    # NOTE: a broad "split at every cross-function branch target" refinement was
+    # tried and reverted -- it converts intra-function loops that SPAN a new split
+    # point into cross-function tail-recursion (stack blow-up). Mid-function jcc/jmp
+    # targets must be handled another way (e.g. true mid-function entry support).
     return segbase
 
 
@@ -269,7 +273,11 @@ def main():
     # referenced-but-undefined call targets -> stubs
     stubs = sorted(n for n in referenced if n not in defined)
 
-    # write chunked bodies
+    # write chunked bodies (remove stale chunks first so a smaller run can't leave
+    # orphaned recomp_NNNN.c referencing functions that no longer exist)
+    import glob as _glob
+    for _old in _glob.glob(os.path.join(OUT, "recomp_[0-9][0-9][0-9][0-9].c")):
+        os.remove(_old)
     chunks = [bodies[i:i + CHUNK] for i in range(0, len(bodies), CHUNK)]
     for i, ch in enumerate(chunks):
         with open(os.path.join(OUT, f"recomp_{i:04d}.c"), "w") as f:

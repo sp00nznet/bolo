@@ -1,5 +1,49 @@
 # Runbook — where to pick up
 
+## ★★★ MILESTONE (2026-06-07): heap init fixed — the recomp reaches GRAPHICS RENDERING
+
+The QB string-heap GC infinite loop is **fixed**, and the recomp now runs all the way
+into the game's **graphics line-drawing** code (it is trying to draw the screen).
+
+**Root cause that was blocking everything:** the QB runtime reaches its init / handler
+/ heap-registration routines through INDIRECT calls via DGROUP routine tables (the
+handler walker `res_01AE54`'s `call far ds:[di]`, the init dispatcher `res_0146DF`'s
+`call word ds:[si]`). Many of those targets land in the MIDDLE of other functions
+(e.g. the init-table patcher `res_01B72E` = 1B72:000E) and were never discovered, so
+the dispatchers hit no-op stubs. Result: the init table stayed unbound (all `0x58DE`
+ret-stubs), the string heap was never initialized (head `ds:[0x4846]`=`0xFFFF`), and
+the GC `res_017B81` looped forever.
+
+**The fix:** collect EVERY call target from the Unicorn ground truth and force them as
+function starts with their ground-truth segment.
+- `uni_original.py` records `{linear_addr: cs}` for all post-entry call targets ->
+  `tools/calltgts.json` (regenerate: `UNI_HEAPTRACE=0x1 UNI_NMAX=30000000 python
+  tools/uni_original.py`; needs faithful-enough INT 21h to run — see caveat below).
+- `lift_bolo.py` loads `tools/calltgts.json` and forces each as a start (segbase=cs).
+- Functions 947 -> 1110. The heap GC wedge is GONE.
+
+**Current wedge (next frontier): Cohen-Sutherland line-clip non-convergence.**
+`res_013BBF` (QB `LINE`/draw, dispatches plot primitives via `ds:[0x46AB..0x46C7]`)
+runs the clip loop `res_013AAF`/`res_013B0C`/`res_019AD2`/`res_013B42` which never
+converges (wedges ~enter#112383; no EGA writes yet — wedged before the actual plot).
+Two contributing leads:
+1. **Mid-function jcc targets still miss.** e.g. `res_013B42`'s `je`->`0x13B88`
+   (a `jmp 0x147C6`) dispatch-MISSES because `0x13B88` is mid-`res_013B66` and not a
+   function start, so the clip multiply helper can return wrong -> clip diverges.
+   A broad "split at every cross-function branch target" pass was tried and REVERTED:
+   it turns intra-function loops that span a new split point into tail-RECURSION
+   (stack blow-up; wedged at 74 enters). Mid-function entries need a real mechanism
+   (true mid-function dispatch, or a careful loop-aware split), not a blanket split.
+2. The clip math (`res_013B0C` fixed-point muldiv via `res_013B42`) may have a flag/
+   arithmetic lifting bug, or the line coords feeding `res_013BBF` are off.
+
+**CAVEAT on the oracle:** the harness now wedges in its OWN run (incomplete INT 21h),
+so our recomp runs AHEAD of it — the differential trace can't validate the graphics
+code. To debug further, either (a) make `uni_original.py` faithful enough (more INT
+21h/10h/16h) to reach the graphics code, or (b) debug the clip math directly
+(instrument `res_013BBF` line coords + `ds:[0x46xx]` plot pointers + the clip loop's
+exit condition). Diagnostics ready: `BOLO_HEAP`, `BOLO_WATCHDOG`, `BOLO_WATCH`.
+
 ## ▶ SESSION UPDATE (2026-06-06): control-flow lifter fixes + dispatch-table discovery
 
 The recomp now executes **~286K instructions** (was wedging at ~4K) before hitting
