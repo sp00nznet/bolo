@@ -90,8 +90,22 @@ def main():
         for m in _re.finditer(r"0x([0-9A-Fa-f]+)UL", open("src/recomp/gen/recomp_dispatch.c").read()):
             starts.add(int(m.group(1), 16))
 
+    import os as _os2
+    HEAPT = set(int(x, 0) for x in _os2.environ.get("UNI_HEAPTRACE", "").split(",") if x)
     def hook_code(uc, address, size, _):
         st["n"] += 1
+        if HEAPT and address in HEAPT and st.get("at_entry"):
+            cs = uc.reg_read(UC_X86_REG_CS); ip = uc.reg_read(UC_X86_REG_IP)
+            si = uc.reg_read(UC_X86_REG_SI); ds = uc.reg_read(UC_X86_REG_DS)
+            cx = uc.reg_read(UC_X86_REG_CX)
+            tbl = struct.unpack("<8H", uc.mem_read(ds*16+si, 16))
+            print(f"  [HEAP] IP {address:#07x} cs:ip={cs:04x}:{ip:04x} ds={ds:04x} si={si:04x} "
+                  f"cx={cx:04x} ds:[si..]={['%04x'%w for w in tbl]} prev={st.get('prev',0):#07x}")
+        if HEAPT and st.get("at_entry") and st.get("prev") == 0x146E5:
+            # the instruction AFTER the init-dispatcher's `call word ds:[si]` is the
+            # resolved init-routine entry -- collect them all (image offsets).
+            st.setdefault("inittgts", set()).add(address)
+        st["prev"] = address
         cs = uc.reg_read(UC_X86_REG_CS)
         if cs != st["last_cs"]:
             st["trans"] += 1
@@ -116,6 +130,10 @@ def main():
         # at the real entry: either snapshot+stop, or begin function-entry tracing
         if "qb_entry" in st and cs == st["qb_entry"][0] and not st.get("at_entry"):
             st["at_entry"] = True
+            if HEAPT:
+                # heap-trace mode: just run past the entry (no snapshot/no enter cap)
+                print(f"  [entry] reached; running with HEAPTRACE {sorted(HEAPT)}")
+                return
             if not ENTER_TRACE:
                 dump_snapshot(uc, st["qb_entry"])
                 st["stop"] = "snapshot at real entry"; uc.emu_stop(); return
@@ -168,7 +186,7 @@ def main():
                     uc.reg_write(UC_X86_REG_AX, fd); cf(False)
                 else:
                     uc.reg_write(UC_X86_REG_AX, 2); cf(True)   # file not found
-                if len(st["opens"]) >= 3:
+                if len(st["opens"]) >= (999 if HEAPT else 3):
                     st["stop"] = "reached asset loading"; uc.emu_stop()
                 return
             cf(False); return                    # other INT 21h -> succeed-ish
@@ -184,10 +202,10 @@ def main():
     WATCH = int(_os.environ.get("UNI_WATCH", "0"), 0)
     if WATCH and st.get is not None:
         def hook_mw(uc, access, address, size, value, _):
-            if WATCH <= address < WATCH + 2 and st.get("tracing"):
+            if WATCH <= address < WATCH + 2 and st.get("at_entry"):
                 cs = uc.reg_read(UC_X86_REG_CS); ip = uc.reg_read(UC_X86_REG_IP)
-                print(f"  [W] {address:#07x} <= {value:#06x} ({size}B) by {cs:04x}:{ip:04x} "
-                      f"enter#{st.get('ecount')}")
+                ds = uc.reg_read(UC_X86_REG_DS)
+                print(f"  [W] {address:#07x} <= {value:#06x} ({size}B) by {cs:04x}:{ip:04x} ds={ds:04x} n={st['n']}")
         uc.hook_add(UC_HOOK_MEM_WRITE, hook_mw)
 
     begin = cs0 * 16 + e_ip
@@ -200,6 +218,10 @@ def main():
         pc = (cs << 4) + ip
         print("  bytes@pc:", bytes(uc.mem_read(pc, 16)).hex(' '))
         return
+    if st.get("inittgts"):
+        tg = sorted(st["inittgts"])
+        print(f"\nINIT-ROUTINE TARGETS ({len(tg)}) via call word ds:[si] @0x146E5:")
+        print(" ".join(f"0x{t:05X}" for t in tg))
     print(f"\nstopped: {st.get('stop')} after {st['n']} insns, {st['trans']} CS transitions")
     if "qb_entry" in st:
         print("QB REAL ENTRY:", st["qb_entry"])

@@ -49,9 +49,78 @@ asset-loading), so we diverge *into* it.
   implement the relevant INT 21h calls like `dos_compat.c` does. The heap-GC loop is
   a *separate* real bug (no DOS would spin forever in string GC).
 
-Next concrete step: find why the QB heap allocator returns `0xFFFF` (is `ds=0x1E49`
-the right DGROUP? is the QB "string space top/bottom" pair at `ds:[0x4846±]` set up by
-startup, and did our snapshot capture it, or does init code we mis-lift set it?).
+### Heap allocator trace — sharper diagnosis (BOLO_HEAP beacon)
+
+Traced it (`BOLO_HEAP=1` logs entries of the heap init/GC; uni `UNI_HEAPTRACE=`):
+- **The heap INITIALIZER `res_017D7C` runs ZERO times** in our recomp. It writes the
+  head `ds:[0x4846]`, the bound copies `[0x4848]/[0x484A]`, **and the `0x4` terminator
+  `ds:[si]=4`** that the GC walks until — none of that happens.
+- The GC `res_017B81` runs at **enter#70** with `head=0xFFFF` already (uninitialized),
+  so it scans `0xFF` forever (and then writes `0xFFFF` itself, compounding it).
+- `res_017D7C` is called only from **block E at `0x17429` inside the MERGED function
+  `res_0173CA`**. `res_0173CA` is several distinct QB-runtime routines glued together:
+  block A (entry) `ret`s at `0x173F9`; blocks B(`0x173FA` sets string-space bounds
+  `[0x45B4]/[0x45B6]`), C(`0x1741A`, has a direct far `jmp 1283:2084` rendered as a
+  bare COMMENT — another lifter gap), D(`0x17422`), **E(`0x17429`, the heap init)**,
+  F(`0x17439`) follow AFTER the ret, reachable only by EXTERNAL calls/jumps to those
+  mid-function addresses. They are not function starts, nothing references `0x17429`,
+  so far-calls to them resolve to no-op stubs → **the heap is never initialized.**
+- **And the harness/truth never runs the GC at all** in this window (it reaches asset
+  loading). So our recomp is doing a **premature string allocation** (`res_017E40` →
+  GC) that truth doesn't — i.e. an EARLIER behavioral divergence sends us into the
+  allocator before the heap is set up.
+
+### Two concrete paths forward (both substantial)
+1. **Faithful DOS oracle.** The Unicorn harness STUBS INT 21h (AH=44h etc.), so the
+   recomp-vs-truth differential trace stops being trustworthy at ~enter#23 — exactly
+   where the premature-alloc divergence likely originates. Port `dos_compat.c`'s INT
+   21h semantics into `uni_original.py`'s `hook_intr` so the trace stays faithful past
+   INT 21h, then re-diff to find the FIRST real divergence.
+2. **Basic-block-level entries for merged runtime routines.** `res_0173CA` (and likely
+   others) merge multiple QB-runtime entry points; mid-function entries (`0x173FA`,
+   `0x17422`, `0x17429`, …) are unreachable. Either split discovered functions at
+   `ret`-bounded blocks that are referenced elsewhere, or make `recomp_dispatch` able
+   to enter a function at an arbitrary offset. Also: fix the remaining lifter gap —
+   direct far `jmp seg:off` (op1.type==FAR under mnemonic `jmp`) is dropped to a
+   comment (see `res_0173CA` block C `jmp 1283:2084`); emit a tail-dispatch like the
+   far-`call` path.
+
+Diagnostics added this session for the above: `BOLO_HEAP` (heap init/GC beacons in
+recomp_enter) and `UNI_HEAPTRACE=<addr,addr>` (uni prints caller/stack when IP hits
+given addresses).
+
+### ▶▶ DECISIVE heap finding (next-session start here)
+
+Traced both sides exhaustively:
+- **Truth NEVER writes the heap head `ds:[0x4846]` (=img 0x22CD6) and NEVER runs the
+  string GC `res_017B81`** in its whole run (`UNI_WATCH=0x22CD6 UNI_HEAPTRACE=...`).
+  The head stays at its snapshot value (0). The QB heap initializer `res_017D7C`
+  also never runs in truth.
+- **Our recomp writes head=`0xFFFF` and loops in the GC.** The write comes from the
+  string ALLOCATOR `res_017E40` (`ds:[0x4846]=si` with si=garbage), which is reached
+  via this call path (captured with the GC beacon): `res_0144E2 → res_0174FC →
+  res_014871 → res_014883 → res_0148B4 → res_017B7E → … → res_017D33 → res_017B81`.
+  The allocator's free-block pointer `si` is non-zero (garbage) where truth's would be
+  0 (empty heap → grow path, no GC) — because an upstream heap WALK (`res_017D00`,
+  same `si -= ds:[si-3]` pattern) returns garbage on the never-initialized heap.
+- The QB init dispatcher `res_0146DF` (`call word ds:[si]` over a DGROUP table) DOES
+  run now (enter#26, 7 entries) — but the GC wedge happens during the FIRST init
+  routine (`0x1e65→res_014695`), BEFORE the bounds-setup routine (block B, table
+  entry #1) runs.
+
+**Conclusion: the divergence is UPSTREAM** — our recomp performs string allocations
+(or a heap walk yielding garbage) that truth doesn't at this point. Both start from
+the identical snapshot heap (head=0, zeros), so something between the entry and the
+allocator diverges. Pinning it requires register/memory-faithful comparison past the
+first INT 21h, which the harness currently stubs.
+
+**THE next step (path #1): make `uni_original.py`'s `hook_intr` implement INT 21h like
+`src/recomp/dos_compat.c`** (AH=44h IOCTL→DX, 30h, 25h/35h, 48/49/4A, 3D/3F/3E/40,
+62h, etc.) so the recomp-vs-truth enter+register diff stays faithful from the entry
+through the heap divergence. Then re-run the differential trace (both already emit
+`E <addr> <regs>`), find the FIRST true register/branch divergence, and fix that
+lifter/runtime bug. The heap GC loop is the *symptom*; the real bug is whatever first
+makes a register/branch differ after the snapshot entry.
 
 ## ✅✅ THE NATIVE RECOMP BOOTS AND RUNS THE GAME
 

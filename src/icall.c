@@ -106,6 +106,29 @@ void recomp_enter(unsigned long addr)
     g_enter_n++;
     g_last_enter = addr;
     g_enter_ring[g_enter_ring_pos++ & 63] = addr;
+    if (getenv("BOLO_HEAP") && g_dbg_cpu) {
+        CPU *c = g_dbg_cpu;
+        if (addr == 0x0146DF)       /* QB init-routine dispatcher */
+            fprintf(stderr, "[heap] init-dispatch res_0146DF enter#%ld ds=%04X si=%04X cnt=%04X\n",
+                    g_enter_n, c->ds, c->si, c->mem[(uint32_t)c->ds*16+c->si]|(c->mem[(uint32_t)c->ds*16+c->si+1]<<8));
+        else if (addr == 0x0173FA)  /* block B: string-space bounds setup */
+            fprintf(stderr, "[heap] block-B res_0173FA enter#%ld ds=%04X\n", g_enter_n, c->ds);
+        else if (addr == 0x017D7C)  /* heap initializer */
+            fprintf(stderr, "[heap] INIT res_017D7C enter#%ld ds=%04X cx=%04X\n",
+                    g_enter_n, c->ds, c->cx);
+        else if (addr == 0x017B81) { /* string GC */
+            static int gc_logged = 0;
+            if (!gc_logged++) {
+                fprintf(stderr, "[heap] GC res_017B81 enter#%ld ds=%04X head[0x4846]=%04X; "
+                        "call path (newest first):\n", g_enter_n, c->ds,
+                        c->mem[(uint32_t)c->ds*16+0x4846] | (c->mem[(uint32_t)c->ds*16+0x4847]<<8));
+                for (int i = 0; i < 30; i++) {
+                    int idx = (g_enter_ring_pos - 1 - i) & 63;
+                    if (g_enter_ring[idx]) fprintf(stderr, "    res_%06lX\n", g_enter_ring[idx]);
+                }
+            }
+        }
+    }
     maybe_fire_timer();
     if (g_enter_n == 3000000) {
         ega_dump("work/ega_planes.bin");
