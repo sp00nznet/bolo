@@ -56,3 +56,14 @@ int cpu_load(CPU *cpu, const char *path, uint16_t seg, uint16_t off)
     printf("Loaded %ld bytes at %04X:%04X (flat 0x%06X)\n", size, seg, off, addr);
     return 0;
 }
+
+/* Hardware raises INT 0 here and the DOS handler aborts the program. The game
+ * never divides by zero on purpose, so reaching this means a lifted operand is
+ * wrong -- say which op and keep going with AX/DX untouched, which is more
+ * debuggable than dying. */
+void recomp_div0(const char *what)
+{
+    static int seen = 0;
+    if (seen++ < 16)
+        fprintf(stderr, "[div0] %s: divide by zero (quotient left unchanged)\n", what);
+}

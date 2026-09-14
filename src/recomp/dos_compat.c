@@ -194,6 +194,10 @@ void dos_int21(CPU *cpu)
 {
     uint8_t ah = cpu->ah;
 
+    if (getenv("BOLO_DOSTRACE"))
+        fprintf(stderr, "[int21] AH=%02X AL=%02X BX=%04X CX=%04X DX=%04X DS=%04X\n",
+                ah, cpu->al, cpu->bx, cpu->cx, cpu->dx, cpu->ds);
+
     /* DEBUG: capture the EGA screen the first time the game blocks on a
        stdin keyboard read (title/menu drawn, waiting for a key) */
 
@@ -812,4 +816,17 @@ uint8_t port_in8(CPU *cpu, uint16_t port)
 
     (void)cpu;
     return 0;
+}
+
+/* Word port I/O -- two byte accesses, low half first (ISA bus behaviour). */
+void port_out16(CPU *cpu, uint16_t port, uint16_t value)
+{
+    port_out8(cpu, port, (uint8_t)(value & 0xFF));
+    port_out8(cpu, (uint16_t)(port + 1), (uint8_t)(value >> 8));
+}
+
+uint16_t port_in16(CPU *cpu, uint16_t port)
+{
+    uint16_t lo = port_in8(cpu, port);
+    return (uint16_t)(lo | ((uint16_t)port_in8(cpu, (uint16_t)(port + 1)) << 8));
 }

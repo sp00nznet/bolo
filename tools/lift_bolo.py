@@ -19,10 +19,44 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = r"D:/recomp/pc/tools"
+def _pcrecomp_home():
+    """Where the pcrecomp toolkit lives.
+
+    PCRECOMP_HOME if it is set, otherwise a sibling checkout next to this one --
+    which is how the recomp projects are laid out. Never a hardcoded absolute
+    path: this file carried one for months, it named a drive the toolkit had
+    since moved off, and the relift silently kept using a three-month-old
+    lifter. Same resolver as dinopark/tools/lift_dinopark.py.
+    """
+    env = os.environ.get("PCRECOMP_HOME")
+    cands = [env] if env else []
+    cands += [os.path.join(os.path.dirname(ROOT), "tools"),
+              os.path.join(ROOT, "..", "pcrecomp")]
+    for c in cands:
+        if c and os.path.isdir(os.path.join(c, "tools", "disasm")):
+            return os.path.abspath(c)
+    raise SystemExit(
+        "cannot find the pcrecomp toolkit.\n"
+        "Set PCRECOMP_HOME to your checkout of\n"
+        "  https://github.com/sp00nznet/pcrecomp\n"
+        "(looked in: %s)" % ", ".join(str(c) for c in cands))
+
+
+TOOLS = _pcrecomp_home()
 sys.path.insert(0, os.path.join(TOOLS, "tools", "disasm"))
 sys.path.insert(0, os.path.join(TOOLS, "tools", "lift"))
+import decode16                         # noqa: E402
 from decode16 import Decoder            # noqa: E402
+
+# We decode a SLICE of the snapshot per function (base_offset = the function's
+# linear start), so `pos` is a linear address, not a segment offset. Wrapping a
+# relative branch target to 16 bits is right only for the latter: here a
+# backwards jump produces a small negative target, and masking turns it into
+# 0xFFxx, which the lifter then adds to the function's linear start and lands
+# 0x10000 too high -- on a real function that happens to exist up there, so it
+# dispatches somewhere plausible and wrong. 184 sites in this image, including
+# res_014871's `jmp -0xB4` becoming a jump to 0x247BD.
+decode16.WRAP_NEAR_TARGETS = False
 from lift16 import Lifter               # noqa: E402
 import lift16                           # noqa: E402  (to set _CODE_SEG per function)
 
@@ -168,6 +202,26 @@ def discover(image, detected, far_seg):
                     if t is not None and 0 <= t < N and t not in segbase:
                         segbase[t] = sb        # same segment as caller
                         changed = True
+                elif (ins.mnemonic == "jmp" and op
+                      and op.type in (OpType.REL8, OpType.REL16)):
+                    # A near jmp that LEAVES this function is a tail call, and its
+                    # target is a function start nothing else names -- MSC/QB thunk
+                    # tables are built entirely out of them (res_014871 is three
+                    # such thunks). With WRAP_NEAR_TARGETS off, op.disp is the
+                    # target relative to the slice we handed the decoder -- so it
+                    # is SIGNED, and the linear address is s + disp. Reading it as
+                    # an address instead registers every forward jump displacement
+                    # as a function at linear 0x20-ish.
+                    #
+                    # Only targets strictly outside the scanned range qualify. An
+                    # intra-function jump is a loop or an if, and registering it as
+                    # a start is the "split at every branch target" refinement that
+                    # was tried and reverted below -- it turns a loop spanning the
+                    # split into tail-recursion and blows the C stack.
+                    t = s + op.disp
+                    if 0 <= t < N and not (s <= t < end) and t not in segbase:
+                        segbase[t] = sb        # near jmp keeps CS
+                        changed = True
                 elif (ins.mnemonic in ("call", "jmp") and op and op.type == OpType.MEM
                       and ins.seg_override == "cs"):
                     # cs-relative indirect dispatch: `call/jmp word cs:[reg+disp]`.
@@ -291,8 +345,13 @@ def main():
                 "#ifndef BOLO_RECOMP_H\n#define BOLO_RECOMP_H\n"
                 '#include "cpu.h"\n#include "dos_compat.h"\n\n'
                 "/* computed-transfer dispatcher (retf trampolines, indirect "
-                "call/jmp) */\nvoid recomp_dispatch(CPU *cpu, uint16_t seg, "
-                "uint16_t off);\nvoid recomp_enter(unsigned long addr);\n\n")
+                "call/jmp). dispatch_far additionally unwinds the 4-byte far "
+                "frame the call site pushed when nothing is lifted at the "
+                "target. */\n"
+                "int recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off);\n"
+                "void dispatch_far(CPU *cpu, uint16_t seg, uint16_t off);\n"
+                "void dispatch_near(CPU *cpu, uint16_t seg, uint16_t off);\n"
+                "void recomp_enter(unsigned long addr);\n\n")
         for s in sorted(segs_used):
             f.write(f"#define SEG_{s:04X} 0x{s:04X}\n")
         f.write("\n")

@@ -58,6 +58,10 @@ typedef struct CPU {
     uint16_t ds;
     uint16_t es;
     uint16_t ss;
+    /* A 386 in a 16-bit segment can carry an FS/GS override, and the decoder
+     * emits one wherever it reads a 0x64/0x65 byte. */
+    uint16_t fs;
+    uint16_t gs;
 
     /* Instruction pointer (for debugging/tracing) */
     uint16_t ip;
@@ -346,6 +350,160 @@ static inline int of(CPU *cpu) { return (cpu->flags & FLAG_OF) != 0; }
 static inline int pf(CPU *cpu) { return (cpu->flags & FLAG_PF) != 0; }
 static inline int af(CPU *cpu) { return (cpu->flags & FLAG_AF) != 0; }
 static inline int df(CPU *cpu) { return (cpu->flags & FLAG_DF) != 0; }
+
+/* ---------- ADC / SBB ----------
+ *
+ * The carry is a THIRD input, and folding it into the source loses it:
+ * `flags_add16(a, b + cf)` with b = 0FFFFh and CF set adds zero and reports no
+ * carry out, so the high word of every long addition that happened to hit
+ * all-ones came out wrong -- silently, with a plausible number. One function
+ * per operation instead of one per width; `bits` picks the masks.
+ */
+static inline uint32_t flags_adc(CPU *cpu, uint32_t a, uint32_t b, int bits)
+{
+    uint32_t mask   = (bits == 32) ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+    uint32_t sign   = 1u << (bits - 1);
+    uint64_t c      = (cpu->flags & FLAG_CF) ? 1u : 0u;
+    uint64_t wide   = (uint64_t)(a & mask) + (uint64_t)(b & mask) + c;
+    uint32_t result = (uint32_t)wide & mask;
+
+    a &= mask; b &= mask;
+    cpu->flags &= ~(FLAG_CF | FLAG_OF | FLAG_AF | FLAG_SF | FLAG_ZF | FLAG_PF);
+    if (wide > (uint64_t)mask)              cpu->flags |= FLAG_CF;
+    if ((~(a ^ b) & (a ^ result)) & sign)   cpu->flags |= FLAG_OF;
+    if ((a ^ b ^ result) & 0x10)            cpu->flags |= FLAG_AF;
+    if (result == 0)                        cpu->flags |= FLAG_ZF;
+    if (result & sign)                      cpu->flags |= FLAG_SF;
+    if (parity8((uint8_t)result))           cpu->flags |= FLAG_PF;
+    return result;
+}
+
+static inline uint32_t flags_sbb(CPU *cpu, uint32_t a, uint32_t b, int bits)
+{
+    uint32_t mask   = (bits == 32) ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+    uint32_t sign   = 1u << (bits - 1);
+    uint64_t c      = (cpu->flags & FLAG_CF) ? 1u : 0u;
+    uint32_t result;
+
+    a &= mask; b &= mask;
+    result = (uint32_t)((uint64_t)a - (uint64_t)b - c) & mask;
+    cpu->flags &= ~(FLAG_CF | FLAG_OF | FLAG_AF | FLAG_SF | FLAG_ZF | FLAG_PF);
+    if ((uint64_t)a < (uint64_t)b + c)      cpu->flags |= FLAG_CF;
+    if (((a ^ b) & (a ^ result)) & sign)    cpu->flags |= FLAG_OF;
+    if ((a ^ b ^ result) & 0x10)            cpu->flags |= FLAG_AF;
+    if (result == 0)                        cpu->flags |= FLAG_ZF;
+    if (result & sign)                      cpu->flags |= FLAG_SF;
+    if (parity8((uint8_t)result))           cpu->flags |= FLAG_PF;
+    return result;
+}
+
+/* ---------- Packed / unpacked BCD ----------
+ *
+ * C compilers never emit these, so it is tempting to leave them out -- but
+ * MSC and Borland's own integer-to-decimal routines are hand-written assembly
+ * and AAM is how they split a byte into digits. Stubbed out, a game does not
+ * crash: it prints the wrong numbers. AF is a real input here (DAA, DAS, AAA
+ * and AAS all read it), which is why the 16-bit CPU carries it.
+ *
+ * Intel's pseudocode, followed literally, including DAA's second branch
+ * clearing CF where DAS's does not.
+ */
+static inline void bcd_daa(CPU *cpu)
+{
+    uint8_t old_al = cpu->al;
+    int old_cf = (cpu->flags & FLAG_CF) != 0;
+
+    cpu->flags &= ~FLAG_CF;
+    if ((cpu->al & 0x0F) > 9 || (cpu->flags & FLAG_AF)) {
+        cpu->al = (uint8_t)(cpu->al + 6);
+        cpu->flags |= FLAG_AF;
+    } else {
+        cpu->flags &= ~FLAG_AF;
+    }
+    if (old_al > 0x99 || old_cf) {
+        cpu->al = (uint8_t)(cpu->al + 0x60);
+        cpu->flags |= FLAG_CF;
+    }
+    set_szp8(cpu, cpu->al);
+}
+
+static inline void bcd_das(CPU *cpu)
+{
+    uint8_t old_al = cpu->al;
+    int old_cf = (cpu->flags & FLAG_CF) != 0;
+
+    cpu->flags &= ~FLAG_CF;
+    if ((cpu->al & 0x0F) > 9 || (cpu->flags & FLAG_AF)) {
+        if (old_al < 6) cpu->flags |= FLAG_CF;   /* borrow out of AL - 6 */
+        if (old_cf)     cpu->flags |= FLAG_CF;
+        cpu->al = (uint8_t)(cpu->al - 6);
+        cpu->flags |= FLAG_AF;
+    } else {
+        cpu->flags &= ~FLAG_AF;
+    }
+    if (old_al > 0x99 || old_cf) {
+        cpu->al = (uint8_t)(cpu->al - 0x60);
+        cpu->flags |= FLAG_CF;
+    }
+    set_szp8(cpu, cpu->al);
+}
+
+static inline void bcd_aaa(CPU *cpu)
+{
+    if ((cpu->al & 0x0F) > 9 || (cpu->flags & FLAG_AF)) {
+        /* AX += 106h, not AL += 6 and AH += 1 separately: the carry out of AL
+           propagates into AH, so AL = 0FFh lands on AH + 2. */
+        cpu->ax = (uint16_t)(cpu->ax + 0x106);
+        cpu->flags |= (FLAG_AF | FLAG_CF);
+    } else {
+        cpu->flags &= ~(FLAG_AF | FLAG_CF);
+    }
+    cpu->al &= 0x0F;
+}
+
+static inline void bcd_aas(CPU *cpu)
+{
+    if ((cpu->al & 0x0F) > 9 || (cpu->flags & FLAG_AF)) {
+        /* AX -= 106h for the same reason: a borrow out of AL takes AH with it. */
+        cpu->ax = (uint16_t)(cpu->ax - 0x106);
+        cpu->flags |= (FLAG_AF | FLAG_CF);
+    } else {
+        cpu->flags &= ~(FLAG_AF | FLAG_CF);
+    }
+    cpu->al &= 0x0F;
+}
+
+/* AAM's divisor is an operand, not always 10: `aam 16` is how assembly splits
+ * a byte into hex nibbles for display. A zero divisor is a divide-by-zero
+ * fault on hardware; leave AX alone rather than trap the host. */
+static inline void bcd_aam(CPU *cpu, uint8_t base)
+{
+    if (base == 0) return;
+    cpu->ah = (uint8_t)(cpu->al / base);
+    cpu->al = (uint8_t)(cpu->al % base);
+    set_szp8(cpu, cpu->al);
+}
+
+static inline void bcd_aad(CPU *cpu, uint8_t base)
+{
+    cpu->al = (uint8_t)(cpu->al + cpu->ah * base);
+    cpu->ah = 0;
+    set_szp8(cpu, cpu->al);
+}
+
+/* The lifter emits RECOMP_ENTER("res_xxxxxx") in every body. pcrecomp's own
+ * tracer behind it takes a name; bolo already has its own recomp_enter(addr)
+ * beacon in icall.c, so leave this a no-op and keep the existing one. */
+#define RECOMP_ENTER(name) ((void)0)
+
+/* RECOMP_TICK lands on every loop back-edge so the project can run the guest's
+ * timer ISR while lifted code is still inside a C loop. bolo currently pumps
+ * the timer from recomp_enter() every 150 entries instead, which cannot reach a
+ * spin loop that never leaves its function -- worth switching to, but that is a
+ * behaviour change, not part of the relift. */
+#define RECOMP_TICK(cpu) ((void)0)
+
+void recomp_div0(const char *what);   /* divide-by-zero trap (cpu.c) */
 
 /* Condition code tests (matching x86 Jcc encodings) */
 static inline int cc_o(CPU *cpu)  { return of(cpu); }

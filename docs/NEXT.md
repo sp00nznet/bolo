@@ -1,5 +1,91 @@
 # Runbook — where to pick up
 
+## ★★★ (2026-09-12, relift session): the recomp now REPRODUCES THE ORACLE's state
+
+Relifted against current pcrecomp (the driver had been pinned to a dead drive for
+three months) and fixed two real control-flow bugs. The recomp no longer takes its
+own divergent path: it now wedges in `res_017D00` with `head=0`, `si=0` — **the
+exact state the Unicorn harness reaches**, documented in the section below. The
+differential trace is trustworthy again, and the remaining blocker is the one
+already root-caused: `res_017D7C` (string-space init, block E) never runs.
+
+| | before (6b7b7bc) | after |
+|---|---|---|
+| heap head `ds:[0x4846]` | `FFFF` (corrupt) | `0000` — matches truth |
+| wedge | clip loop `013B42`/`013B0C`/`019AD2` | `res_017D00` walker — matches truth |
+| dispatch misses / run | 460 | 110 |
+| functions lifted | 1110 | 1377 |
+| QB `R6003 integer divide by 0` | — | gone |
+
+### 1. The lifter was reading a three-month-old toolbox
+
+`tools/lift_bolo.py` hard-coded `TOOLS = r"D:/recomp/pc/tools"`. The toolkit had
+moved to `G:`; the `D:` checkout is frozen at 2026-06-17. Every "relift" since June
+silently used a June lifter. Now resolved via `PCRECOMP_HOME`, else the sibling
+checkout (same `_pcrecomp_home()` resolver as `dinopark/tools/lift_dinopark.py`).
+
+Picked up in the process: `flags_adc`/`flags_sbb` (the carry is a third input — the
+old `flags_add16(a, b + cf)` form silently lost it whenever the low half hit
+`0xFFFF`), the BCD family, shift flags (`shl/shr/sar r, cl` with `cl=0` used to
+clobber CF/SF/ZF/PF, and OF was never set at all — 2397 sites), 3-operand
+`imul r16, r/m16, imm`, and `recomp_div0`. Runtime helpers ported into
+`src/recomp/cpu.h` / `cpu.c` / `dos_compat.c` to match.
+
+### 2. Wrapped branch targets — 184 sites, every backwards branch 0x10000 too high
+
+`lift_bolo.py` decodes each function as a SLICE of the snapshot (`base_offset` =
+the function's linear start), so the decoder's `pos` is a linear address, not a
+segment offset. `decode16` was masking every relative branch target to 16 bits —
+correct only for a segment offset. A backwards branch became `0xFFxx`, which the
+lifter added to the function's linear start, landing `0x10000` too high **on a real
+function that happens to exist up there** — so it dispatched somewhere plausible
+and wrong instead of failing loudly.
+
+Fix: `decode16.WRAP_NEAR_TARGETS = False` (the switch pcrecomp added for civ, which
+hits this the same way). `res_014871`'s `jmp -0xB4` was lifted as a jump to
+`0x247BD` instead of `0x147BD`. The pre-relift generated code has the identical
+wrong targets, so this had been corrupting control flow the whole time.
+
+### 3. Discovery never followed a near `jmp` out of a function
+
+Once targets were correct they could be followed. MSC/QB thunk tables are built
+entirely out of tail jumps, so a whole class of routines was invisible:
+**1110 -> 1377 functions**. Bounded to targets strictly outside the scanned range,
+so it is NOT the "split at every cross-function branch target" refinement that was
+tried and reverted (that one turns a loop spanning the split into tail-recursion).
+
+Watch out: `op.disp` from the decoder is SIGNED and relative to the slice, not a
+linear address — the linear target is `s + op.disp`. Reading it as an address
+registers every forward displacement as a function at linear 0x20-ish (239 junk
+starts, briefly).
+
+### 4. Dispatcher: an empty table slot is not a miss
+
+`dispatch_near`/`dispatch_far` now skip an offset of 0 — a QB routine table starts
+zeroed and the real code skips a zero entry rather than calling it (64 calls
+through `1283:0000` per run). On a genuine miss they unwind the 2- or 4-byte frame
+the call site pushed, so the guest stack stays balanced.
+
+**How the bug presented**, for the next time something like it shows up: a
+corrupted stack left `cx = 0xFFFF`, so a table walk ran 65535 iterations off the
+end of its table into the shareware nag string, calling each word as a function
+pointer. The dispatch-miss targets decode, as little-endian words, to
+`"BECOME SOLEAU SOFTWARE MEMBER!"` — which is how the walk was identified. It ended
+in the C runtime's `R6003 - integer divide by 0`.
+
+### Notes for next session
+
+- **pcrecomp is moving.** 12 commits landed during this session (another session is
+  actively hardening the 16-bit path). `a89a902` adds `difftest16.py` — the lifted
+  16-bit C run against a real x86 — which is the principled way to find the
+  remaining lifter bugs rather than bisecting by hand.
+- **`RECOMP_TICK`** (pcrecomp `6fe3bcd`) fires on every loop back-edge. bolo pumps
+  the timer from `recomp_enter()` every 150 entries instead, which cannot reach a
+  spin loop that never leaves its function — exactly the shape of these wedges.
+  Defined as a no-op in `cpu.h` for now; worth adopting.
+- The trailing generated chunks are still 10-16 MB of C each (data walked as code,
+  `soft gaps: 117`). That is why the binary is 48 MB and the build takes ~40 min.
+
 ## ▶▶▶ ROOT CAUSE (2026-06-07, oracle session): QB string-space INIT never runs
 
 Built a faithful DOS layer in `uni_original.py` (MCB arena + INT 21h post-entry,

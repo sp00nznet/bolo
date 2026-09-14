@@ -44,7 +44,7 @@ static void (*lookup(unsigned long image_off))(CPU*)
 
 CPU *g_dbg_cpu = NULL;
 long g_enter_n = 0;
-void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off);   /* fwd decl */
+int  recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off);   /* fwd decl; 1 = dispatched */
 extern uint32_t dos_get_vector(unsigned n);
 extern void dos_tick(CPU *cpu);
 static int g_in_timer = 0;
@@ -66,6 +66,7 @@ static void maybe_fire_timer(void)
     g_in_timer = 0;
 }
 
+void *g_miss_site = 0;          /* C return addr of the last dispatch call site */
 unsigned long g_last_enter = 0;          /* most recent function entered */
 unsigned long g_enter_ring[64];          /* recent enter history (call path) */
 int g_enter_ring_pos = 0;
@@ -177,7 +178,7 @@ void recomp_enter(unsigned long addr)
     }
 }
 
-void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off)
+int recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off)
 {
     unsigned long linear = (unsigned long)seg * 16 + off;
     unsigned long image_off = linear - g_load_base;
@@ -188,14 +189,30 @@ void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off)
     g_dispatch_calls++;
     if (!fn) {
         g_dispatch_misses++;
-        if (g_trace && g_dispatch_misses <= 40)
+        if (g_trace && g_dispatch_misses <= 200)
             fprintf(stderr, "[icall] miss %04X:%04X -> image 0x%05lX "
-                    "(no lifted fn)\n", seg, off, image_off);
-        return;                      /* unresolved -> treat as plain return */
+                    "(no lifted fn) from %06lX cx=%04X si=%04X sp=%04X\n",
+                    seg, off, image_off, g_last_enter,
+                    g_dbg_cpu ? g_dbg_cpu->cx : 0,
+                    g_dbg_cpu ? g_dbg_cpu->si : 0,
+                    g_dbg_cpu ? g_dbg_cpu->sp : 0);
+        /* A miss storm means some loop is walking a table off its end and
+         * calling data. g_last_enter pins the last function that ran, not the
+         * loop -- the enter ring does. */
+        if (g_dispatch_misses == 30) {
+            fprintf(stderr, "*** miss storm; call site %p (addr2line it); "
+                    "enter ring (newest first):\n", g_miss_site);
+            for (int i = 0; i < 24; i++) {
+                int idx = (g_enter_ring_pos - 1 - i) & 63;
+                if (g_enter_ring[idx])
+                    fprintf(stderr, "    res_%06lX\n", g_enter_ring[idx]);
+            }
+        }
+        return 0;                    /* unresolved -> treat as plain return */
     }
     if (g_depth > 4096) {            /* runaway guard */
         if (g_trace) fprintf(stderr, "[icall] depth cap hit\n");
-        return;
+        return 0;
     }
     if (g_trace && g_dispatch_calls <= 60)
         fprintf(stderr, "[icall] %04X:%04X -> image 0x%05lX\n", seg, off, image_off);
@@ -203,4 +220,32 @@ void recomp_dispatch(CPU *cpu, uint16_t seg, uint16_t off)
     g_depth++;
     fn(cpu);
     g_depth--;
+    return 1;
+}
+
+/* An indirect FAR call site pushes cs + a 0xFFFF sentinel offset and expects
+ * the callee's retf to pop them. If nothing runs at the target, nobody pops --
+ * so unwind the 4-byte frame here, or the stack drifts by 4 on every miss and
+ * the caller returns into rubbish.
+ *
+ * An offset of 0 is not a miss, it is an EMPTY SLOT. The QB runtime's routine
+ * tables start zeroed and the real code skips a zero entry rather than calling
+ * it; dispatching it anyway walks into whatever sits at the segment base. Same
+ * reasoning the lifter uses to ignore a popped return offset of 0 -- a real
+ * target points *after* a call, so it is never 0. */
+void dispatch_far(CPU *cpu, uint16_t seg, uint16_t off)
+{
+    g_miss_site = __builtin_return_address(0);
+    if (!off && !seg) { cpu->sp += 4; return; }
+    if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 4;
+}
+
+
+/* The near form pushes only the 2-byte return offset, and its table slot holds
+ * the offset alone -- so a zero offset is the empty slot regardless of seg. */
+void dispatch_near(CPU *cpu, uint16_t seg, uint16_t off)
+{
+    g_miss_site = __builtin_return_address(0);
+    if (!off) { cpu->sp += 2; return; }
+    if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 2;
 }
