@@ -19,7 +19,7 @@ already root-caused: `res_017D7C` (string-space init, block E) never runs.
 
 ### 1. The lifter was reading a three-month-old toolbox
 
-`tools/lift_bolo.py` hard-coded `TOOLS = r"D:/recomp/pc/tools"`. The toolkit had
+`tools/lift_bolo.py` hard-coded `TOOLS = r"$RECOMP_ROOT/pc/tools"`. The toolkit had
 moved to `G:`; the `D:` checkout is frozen at 2026-06-17. Every "relift" since June
 silently used a June lifter. Now resolved via `PCRECOMP_HOME`, else the sibling
 checkout (same `_pcrecomp_home()` resolver as `dinopark/tools/lift_dinopark.py`).
@@ -169,7 +169,7 @@ the current frontier. Found and fixed a chain of real lifter bugs by differentia
 tracing against the Unicorn ground truth (`uni_original.py --enter-trace`, now with
 per-enter register dumps) plus new runtime diagnostics.
 
-**Lifter fixes (in the SHARED toolkit `D:/recomp/pc/tools/tools/lift/lift16.py`):**
+**Lifter fixes (in the SHARED toolkit `$RECOMP_ROOT/pc/tools/tools/lift/lift16.py`):**
 1. **Out-of-function `jcc`/`jmp`/`loop*`/`jcxz` were dropped to comments.** They are
    tail-jumps to other functions; now emit a real tail-call (`fn(cpu); return;`) or
    `recomp_dispatch(...)` fallback. New helper `_tail_jump(abs)`. This was THE bug
@@ -396,7 +396,7 @@ lift gaps and getting a build running.
 # 1. unpack the original (writes work/BOLO3_image.bin + work/BOLO3_unpacked.exe)
 python tools/unpklite.py original/BOLO3.EXE work/BOLO3_image.bin --mz work/BOLO3_unpacked.exe
 # 2. function analysis -> work/bolo3.toml
-python D:/recomp/pc/tools/tools/disasm/analyze.py work/BOLO3_unpacked.exe -symbols work/bolo3.toml
+python $RECOMP_ROOT/pc/tools/tools/disasm/analyze.py work/BOLO3_unpacked.exe -symbols work/bolo3.toml
 # 3. lift to C -> src/recomp/gen/   (segment-aware; 932 funcs, 99% near calls)
 python tools/lift_bolo.py
 ```
