@@ -169,9 +169,11 @@ without a window; `BOLO_TRACE=1` logs every function entry for diffing against
 Original game © 1993 **William Soleau / Soleau Software**, distributed as
 shareware. This is a personal preservation / reverse-engineering project of a
 long-abandoned title; all reverse-engineered code here is original work produced
-by analyzing the freely-distributable shareware binary. The original game files
-are included because they're tiny, freely redistributable, and serve as the
-reference for the recompilation. If you enjoyed Bolo, go say thanks to Soleau
-Software.
+by analyzing the freely-distributable shareware binary. The unmodified shareware
+package is included in [`original/`](original/) — the game's own terms say it
+"may be passed along to your friends or local BBS" — because it's tiny and it is
+the reference for the recompilation. Those files remain © Soleau Software under
+their original shareware terms; the repo's MIT license covers only the code and
+tools written here. If you enjoyed Bolo, go say thanks to Soleau Software.
 
 Built with the [pcrecomp toolkit](../tools) and far too much nostalgia.

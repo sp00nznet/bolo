@@ -1,0 +1,4 @@
+# the shareware files are stored byte-for-byte: no line-ending conversion
+* -text
+README.md text
+.gitattributes text

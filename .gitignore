@@ -36,11 +36,13 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# --- Original retail game files: NOT redistributed in this repo ---
-# Bolo Adventures III (c) 1993 William Soleau / Soleau Software. The game is
-# shareware (freely passable), but to be safe for a public repo we keep the
-# original binaries local-only. Drop the shareware files into original/ yourself.
-original/
+# --- Original game files ---
+# Bolo Adventures III (c) 1993 William Soleau / Soleau Software is shareware,
+# and its own terms let it be "passed along to your friends or local BBS", so
+# the unmodified shareware package lives in original/ (see original/README.md).
+# Keep out what the game writes there at run time, and the duplicate archive.
+original/BOLO3.SCR
+original/_original_archive.zip
 # Derived runtime artifacts (decompressed game image etc. -- regenerate from the
 # original via the tools; also copyrighted-derived so not redistributed).
 work/
