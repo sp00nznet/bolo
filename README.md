@@ -164,6 +164,26 @@ arrows, `~` = 150 ms pause, trailing `$` = stop); `SDL_VIDEODRIVER=dummy` runs
 without a window; `BOLO_TRACE=1` logs every function entry for diffing against
 `tools/uni_original.py --enter-trace`.
 
+## About the author
+
+*Bolo Adventures III* is the work of **William Soleau**, who ran Soleau Software
+as a one-man shop out of 163 Amsterdam Avenue in New York — the address is still
+on the game's registration form — and put out
+[some 57 DOS games](https://www.classicdosgames.com/company/soleau.html) of
+logic puzzles and gentle arcade fare through the 1990s and early 2000s. The
+Soleau Software site now reads simply *"Thank-you for 30 years."*
+
+Games were only half of it. By all accounts the same William Soleau — the
+Amherst graduate of the Soleau Software bio — is a ballet dancer turned
+choreographer: a former principal dancer who
+[performed in over 30 countries](http://www.balletdances.com/resume.html),
+worked with Alvin Ailey, John Butler and Antony Tudor, and has made more than
+100 ballets for companies around the world, from the Shanghai Ballet to Ballet
+Austin. Since 2018 he has been
+[co-artistic director of State Street Ballet](https://statestreetballet.com/william-soleau)
+in Santa Barbara. Somewhere between rehearsals, Mr. Bolo got his lasers and his
+water. Thank you, Mr. Soleau.
+
 ## Credits & legal
 
 Original game © 1993 **William Soleau / Soleau Software**, distributed as
