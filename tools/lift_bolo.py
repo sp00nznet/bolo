@@ -57,6 +57,7 @@ from decode16 import Decoder            # noqa: E402
 # dispatches somewhere plausible and wrong. 184 sites in this image, including
 # res_014871's `jmp -0xB4` becoming a jump to 0x247BD.
 decode16.WRAP_NEAR_TARGETS = False
+decode16.EMU87_INTS = True        # QB's 8087 emulator INTs 34h-3Dh are x87 code
 from lift16 import Lifter               # noqa: E402
 import lift16                           # noqa: E402  (to set _CODE_SEG per function)
 
@@ -77,6 +78,9 @@ FUNC_RE = re.compile(
 
 ENTRY = 0x1B484          # real program entry: runtime 1AB4:0944 -> snapshot linear
 ENTRY_SEG = 0x1AB4       # caller segment for the entry (for near-call resolution)
+ON_GOTO = 0x15A35        # QB ON..GOSUB helper (1283:3205): inline jump table after the call
+ON_GOSUB_AFTER = {}      # call site -> code after its table (where the label RETURNs to)
+DGROUP_LIN = 0x1E490     # ds=1E49: everything from here up is data, not code
 MAXLEN = 0x2000          # cap a region scan so we don't run deep into data
 # Call targets captured from the Unicorn ground truth (work/calltgts.json, a
 # {linear_addr: cs} map produced by `UNI_HEAPTRACE=0x1 UNI_NMAX=... uni_original.py`).
@@ -128,7 +132,16 @@ def scan_far_targets(image):
             t = seg * 16 + off
             if 0 <= t < N:
                 seg_of.setdefault(t, seg)
-    return seg_of
+    # A 9A/EA byte inside data or inside another instruction reads as a far
+    # pointer too: 0x15689 (seg 09E8) landed mid-`call` in res_015650, cut it
+    # in two and dropped the call. Keep a segment ground truth runs code in, or
+    # one inside the program's code range that at least two pointers agree on.
+    truth = set(CALLTGT_SEG.values())
+    hits = {}
+    for s in seg_of.values():
+        hits[s] = hits.get(s, 0) + 1
+    return {t: s for t, s in seg_of.items()
+            if s in truth or (0x100 <= s < DGROUP_LIN >> 4 and hits[s] >= 2)}
 
 
 def near_call_target(ins, func_start, segbase):
@@ -160,6 +173,25 @@ def segbase_for(addr, far_sorted):
     return addr >> 4 & 0xF000        # last-resort fallback
 
 
+def on_boundary(image, starts, t):
+    """Is t an instruction boundary of the function that contains it?
+
+    Padding and data between routines decode as a stream of plausible jcc's,
+    and their targets land mid-instruction (0x1A32F, inside res_01A319's
+    `and al, [0x46E8]`). Registering one cuts a real function in two.
+    """
+    import bisect
+    i = bisect.bisect_right(starts, t) - 1
+    if i < 0:
+        return False
+    pos = starts[i]
+    dec = Decoder(image[pos:t + 16], base_offset=pos)
+    while dec.pos < t - pos:
+        if dec.decode_one() is None:
+            return False
+    return dec.pos == t - pos
+
+
 def discover(image, detected, far_seg):
     """Segment-aware function discovery (far + near closure).
 
@@ -182,6 +214,8 @@ def discover(image, detected, far_seg):
         starts = sorted(segbase)
         for i, s in enumerate(starts):
             sb = segbase[s]
+            if not 0 <= s - sb * 16 <= 0xFFFF:
+                continue    # no CS reaches it: junk (res_01240D under seg 0100)
             nxt = starts[i + 1] if i + 1 < len(starts) else N
             end = min(s + MAXLEN, nxt, N)
             if end <= s:
@@ -197,13 +231,30 @@ def discover(image, detected, far_seg):
                     if 0 <= t < N and t not in segbase:
                         segbase[t] = op.far_seg
                         changed = True
+                    if t == ON_GOTO and ins.mnemonic == "call":
+                        # count byte + word table follow the call; every entry
+                        # and the fall-through past the table is a start
+                        p = ins.offset + len(ins.raw)
+                        n = image[p]
+                        tgts = [sb * 16 + (image[p + 1 + 2 * k] | image[p + 2 + 2 * k] << 8)
+                                for k in range(n)] + [p + 1 + 2 * n]
+                        ON_GOSUB_AFTER[ins.offset] = tgts[-1]   # label RETURNs here
+                        for u in tgts:
+                            if u not in segbase:
+                                segbase[u] = sb
+                                changed = True
                 elif ins.mnemonic == "call" and op and op.type == OpType.REL16:
                     t = near_call_target(ins, s, sb)
                     if t is not None and 0 <= t < N and t not in segbase:
                         segbase[t] = sb        # same segment as caller
                         changed = True
-                elif (ins.mnemonic == "jmp" and op
-                      and op.type in (OpType.REL8, OpType.REL16)):
+                elif ((ins.mnemonic == "jmp" or ins.mnemonic.startswith("j")
+                       or ins.mnemonic in ("loop", "loope", "loopne"))
+                      and op and op.type in (OpType.REL8, OpType.REL16)):
+                    # (conditional jumps too: QB shares tail `ret`s between
+                    # routines -- res_017836's `jae` lands on 0x1788A, the last
+                    # byte of its neighbour -- and an unregistered target is a
+                    # dispatch miss that silently skips the rest of the caller)
                     # A near jmp that LEAVES this function is a tail call, and its
                     # target is a function start nothing else names -- MSC/QB thunk
                     # tables are built entirely out of them (res_014871 is three
@@ -219,7 +270,13 @@ def discover(image, detected, far_seg):
                     # was tried and reverted below -- it turns a loop spanning the
                     # split into tail-recursion and blows the C stack.
                     t = s + op.disp
-                    if 0 <= t < N and not (s <= t < end) and t not in segbase:
+                    if ins.mnemonic != "jmp" and not (
+                            s < DGROUP_LIN and t < DGROUP_LIN
+                            and on_boundary(image, starts, t)):
+                        continue    # conditional: code only, and a real instruction
+                    # a near jump keeps CS, so the target must lie inside it
+                    if (0 <= t < N and not (s <= t < end) and t not in segbase
+                            and 0 <= t - sb * 16 <= 0xFFFF):
                         segbase[t] = sb        # near jmp keeps CS
                         changed = True
                 elif (ins.mnemonic in ("call", "jmp") and op and op.type == OpType.MEM
@@ -267,7 +324,30 @@ def main():
     from decode16 import OpType
     # segment-aware discovery -> {start: segbase}; recompute boundaries
     far_seg = scan_far_targets(image)
+    # Seed discovery with the ground-truth call targets too, not just add them
+    # afterwards: added late, their bodies are never scanned, so a tail-jmp out
+    # of one (res_01A426 -> 0x1A39E, the video-mode setup) never becomes a start
+    # and the dispatcher silently drops it.
+    for fs in INIT_ROUTINES:
+        far_seg[fs] = CALLTGT_SEG.get(fs, 0x1283)
     segbase = discover(image, detected, far_seg)
+    # QB installs its device/print handlers at run time with
+    # `mov word [slot], imm16` into DGROUP vector slots (0x4400-0x48FF); the
+    # dispatcher later does `call word [slot]`. Those targets sit mid-function,
+    # so nothing else names them. Register every one that lands on an
+    # instruction boundary of the runtime segment, then discover again.
+    RT_SEG, RT_LIN = 0x1283, 0x12830
+    starts = sorted(segbase)
+    extra = 0
+    for p in range(RT_LIN, DGROUP_LIN - 6):
+        if image[p] == 0xC7 and image[p + 1] == 0x06:
+            slot = image[p + 2] | image[p + 3] << 8
+            t = RT_LIN + (image[p + 4] | image[p + 5] << 8)
+            if (0x4400 <= slot < 0x4900 and RT_LIN + 0x100 <= t < DGROUP_LIN
+                    and t not in segbase and on_boundary(image, starts, t)):
+                far_seg[t] = RT_SEG; extra += 1
+    if extra:
+        segbase = discover(image, detected, far_seg)
     for fs in FORCE_STARTS:                 # trampoline continuations
         segbase.setdefault(fs, segbase_for(fs, sorted(far_seg.items())))
     for fs in INIT_ROUTINES:               # force ground-truth segment per target
@@ -275,8 +355,22 @@ def main():
     starts = sorted(segbase)
     n_detected = len(detected)
     funcs = []
+    import bisect
     for i, s in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else N
+        if end < N and s < DGROUP_LIN:
+            # A start can sit *inside* one of this function's instructions:
+            # `mov ah,1 / cmp ax,02B4h` is also `mov ah,2` one entry later
+            # (1283:2749 / 274C). Cutting at it drops the rest of this body, so
+            # decode on past it to the next start that is a real boundary; the
+            # shared tail is then lifted twice, correctly both times.
+            dec = Decoder(image[s:min(end + 16, N)], base_offset=s)
+            while dec.pos < end - s:
+                if dec.decode_one() is None:
+                    break
+            if dec.pos > end - s:
+                j = bisect.bisect_left(starts, s + dec.pos)
+                end = starts[j] if j < len(starts) else N
         end = min(end, s + MAXLEN, N)
         funcs.append((f"res_{s:06X}", s, end, far_of.get(s, True)))
 
@@ -286,6 +380,17 @@ def main():
 
     lifter = Lifter(hdr_size=0, known_funcs=known)
     lifter.dispatch = True          # emit recomp_dispatch() for retf/indirect transfers
+    lifter.x87 = True               # real ESC opcodes -> the x87_* model in cpu.h
+    # ...but the emulator INTs go to QB's own emulator, as on a PC without an
+    # 8087: the runtime also calls the emulator directly (1B89:0024), and a
+    # native x87 beside it would keep a second, disconnected FP stack.
+    lifter.x87_emu_dispatch = True
+    # far seg:off is exactly seg*16+off here. Without this, lift16 tries civ's
+    # "seg*16+off-0x14" first and binds `call 1AB4:0024` to res_01AB50.
+    lifter.far_base = 0
+    lifter.inline_table_calls = {ON_GOTO}
+    lifter.inline_table_after = ON_GOSUB_AFTER
+    lifter.iret_frame = True        # iret pops FLAGS/CS/IP; icall.c pushes one for the timer ISR
     bodies = []
     referenced = set()
     n_ok = n_fail = n_insns = n_unhandled = 0

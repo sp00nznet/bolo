@@ -29,10 +29,11 @@ SRCS=(
 # bootstrap; src/main.c is our entry point.
 
 echo "compiling..."
-for f in ${SRCS[@]}; do
-  o="build/obj/$(echo "$f" | sed 's#[/.]#_#g').o"
-  gcc -O1 -c $INC $SDLC "$f" -o "$o"
-done
+rm -f build/obj/*.o   # chunk count changes across relifts; stale objs would link twice
+export INC SDLC
+printf '%s
+' ${SRCS[@]} | xargs -P "$(nproc)" -I{} sh -c   'gcc -O1 -c $INC $SDLC "{}" -o "build/obj/$(echo "{}" | sed "s#[/.]#_#g").o"'
+
 echo "linking..."
 gcc build/obj/*.o -o build/bolo.exe $SDLL -Wl,--stack,0x8000000
 echo "built build/bolo.exe"

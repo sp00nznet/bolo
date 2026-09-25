@@ -15,6 +15,12 @@
 **Soleau Software, 1993 → native code, today.**
 No DOSBox. No emulator. The original 16-bit DOS binary, taken apart and rebuilt.
 
+<img src="docs/media/demo.gif" width="512" alt="The game's built-in demo puzzle, running natively">
+
+<sub>The game's own demo puzzle, running as recompiled native code — Mr. Bolo
+rolling balls into the water and parking crates in front of lasers on his way
+to the red stairs.</sub>
+
 </div>
 
 ---
@@ -68,6 +74,21 @@ puzzle layouts. Reversing those formats happens in parallel (see
 
 ## Status
 
+🎮 **It's playable.** The recompiled binary boots the way the original does —
+Soleau splash, title, puzzle list — and you can pick a puzzle and walk Mr. Bolo
+around it, entirely as native code.
+
+| Boot | Pick a puzzle | Play |
+|:---:|:---:|:---:|
+| <img src="docs/media/splash.png" width="260" alt="Soleau Software splash"> | <img src="docs/media/puzzle-select.png" width="260" alt="Puzzle select list"> | <img src="docs/media/puzzle-1.png" width="260" alt="Puzzle 1 with Mr. Bolo at the door"> |
+
+What it took, in short: a DOS memory call QB *expects to fail*, an 8087
+emulator the program ships inside itself, QuickBASIC's `ON…GOSUB` tables and
+self-overlapping instructions, and an EGA card faithful enough for QB's
+read-mode and latch tricks. The blow-by-blow is in [`docs/NEXT.md`](docs/NEXT.md).
+
+### How we got here
+
 🚧 **Phase 1 done — the patient is unpacked and on the table.**
 
 - ✅ **Unpacked the PKLITE compression ourselves.** BOLO3.EXE uses PKLITE 1.15 in
@@ -101,7 +122,7 @@ puzzle layouts. Reversing those formats happens in parallel (see
 | 2 | Classify QB runtime vs game logic | ✅ [`docs/CLASSIFY.md`](docs/CLASSIFY.md) |
 | 3 | Lift 8086 → C | ✅ 932 funcs / 70K lines, call graph resolved |
 | 4 | Shim EGA/DOS → SDL2 | ✅ recomp16 runtime wired |
-| 5 | Build & debug to playable | 🔨 **boots & runs the game** (600+ funcs, no crash) |
+| 5 | Build & debug to playable | ✅ **boots to the menu, puzzles load and play** |
 | 6 | Ship native + extras | ⬜ |
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap and milestones.
@@ -119,26 +140,29 @@ bolo/
 
 ## Building & running
 
-It builds **and boots the game**. With MSYS2 mingw64 (gcc + SDL2):
+With MSYS2 mingw64 (gcc + SDL2) and Python (`unicorn`, `capstone`):
 
 ```bash
-# 1. produce the post-startup snapshot (PKLITE + QB startup, run in an emulator)
+# 1. post-startup snapshot (PKLITE + QB startup, run once in a Unicorn harness)
 python tools/uni_original.py
-# 2. lift the decompressed program from the snapshot
+# 2. lift the program from the snapshot  (needs the pcrecomp toolkit: PCRECOMP_HOME)
 python tools/lift_bolo.py
-# 3. build, then relink with a large stack
-bash scripts/build.sh && \
-  gcc build/obj/*.o -o build/bolo.exe $(pkg-config --libs sdl2) -Wl,--stack,0x8000000
-# 4. run
-./build/bolo.exe          # boots & runs the real QB game code
+# 3. build (parallel, ~10 min)
+bash scripts/build.sh
+# 4. play
+PATH=/c/msys64/mingw64/bin:$PATH ./build/bolo.exe work/snapshot.bin
 ```
 
-The native binary loads a faithful post-startup memory snapshot (the QuickBASIC
-self-relocating/decompressing startup is run once in a Unicorn-based harness,
-`tools/uni_original.py`) and dispatches the real program entry. It executes 600+
-functions of the QB runtime + game init and reaches the game's input loop. What's
-left for a *visible* build is the EGA `SCREEN 9` planar video HAL + input event
-feeding — see `docs/NEXT.md`.
+**Controls** are the original game's: `S` select puzzle, arrows + Enter in the
+list, arrows to move Mr. Bolo, `T` try again, `Q` quit. The game reads and
+writes `BOLO3.SCR` (its solved-puzzle record) next to its data files in
+`original/`.
+
+Handy switches: `BOLO_SHOT=N` saves the screen to `work/shot_NNN.bmp` every N
+seconds; `BOLO_KEYS="..."` scripts the keyboard for headless runs (`^U/^D/^L/^R`
+arrows, `~` = 150 ms pause, trailing `$` = stop); `SDL_VIDEODRIVER=dummy` runs
+without a window; `BOLO_TRACE=1` logs every function entry for diffing against
+`tools/uni_original.py --enter-trace`.
 
 ## Credits & legal
 

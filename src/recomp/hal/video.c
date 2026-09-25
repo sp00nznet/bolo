@@ -86,7 +86,7 @@ uint8_t video_port_read(VideoState *vs, uint16_t port)
     case VGA_INPUT_STATUS:
         /* Toggle vsync bit to prevent infinite wait loops */
         vs->vsync_active ^= 1;
-        return vs->vsync_active ? 0x08 : 0x00;
+        return vs->vsync_active ? 0x09 : 0x00;   /* retrace + display-disabled */
 
     default:
         return 0;

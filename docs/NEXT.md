@@ -1,5 +1,107 @@
 # Runbook — where to pick up
 
+## ★★★★★ (2026-09-25, later): PLAYABLE — puzzles load and Mr. Bolo moves
+
+Boot → splash → title → `S` puzzle list → Enter → the puzzle draws and Mr. Bolo
+walks in and responds to the arrows; the Demo Puzzle plays itself (key-stepped).
+README has screenshots + a demo GIF (`docs/media/`).
+
+What fixed the empty/garbled board, in order:
+1. **8087 emulator dispatch.** Native x87 lifting was wrong: QB's runtime also
+   calls its emulator directly (`1B89:0024`), so two FP stacks. Now each
+   `INT 34h-3Dh` pushes a real frame (IP just past `CD nn`) and enters the
+   program's emulator (`lifter.x87_emu_dispatch`, `x87_emu_int` in icall.c). IF
+   is *not* cleared (the emulator never restores it). Emulator entry points are
+   IVT targets -> forced starts (`calltgts.json`; oracle now records them).
+2. **Runtime-installed handlers**: `mov [slot],imm` into DGROUP vector slots
+   (0x4400-0x48FF) registered as starts; `[4562]=0x14AF4` came from the oracle.
+3. **`ON…GOSUB`** (`1283:3205`): inline jump table after the call; the lifter
+   now pushes the real return IP and continues at the code after the table when
+   the label RETURNs (`lifter.inline_table_calls/_after`). Out-of-range index
+   would run that code twice (ponytail note in lift16).
+4. **Overlapping instructions** (`mov ah,1 / cmp ax,02B4h` = second entry):
+   a function's extent now runs past a start that sits inside one of its
+   instructions.
+5. **`cs: xlat` ignored its override** (lift16) -> PUT's XOR code 18h read as 3Fh
+   (rotate 7) -> every sprite scrambled. The big one for visuals.
+6. DOS/BIOS: `2Ch` hundredths (game loop paces on it), extended keys as two DOS
+   reads, a leftover `_Exit` after 3,000,000 function entries (now
+   `BOLO_STOPAT`).
+
+Tools added: `BOLO_KEYS` `^U/^D/^L/^R`, `~`, `$`; `BOLO_DETERMINISTIC` + oracle
+`UNI_KEYS` (same poll-count key feed, per-call clocks) for diffing through menus.
+Limit: gameplay can't be diffed exactly — the game's INT 8 ISR (QB sound queue)
+must fire, and the oracle has no timer.
+
+Next: sound (PC speaker, QB PLAY via INT 8 + PIT), audit the `ON…GOSUB`
+out-of-range case, commit.
+
+
+## ★★★★ (2026-09-25): the native recomp BOOTS TO THE PUZZLE MENU
+
+Normal boot, no shortcuts: Soleau splash → title screen → `S` opens the puzzle
+list (Demo Puzzle, Puzzle 1-15) → Enter selects. Rendered by the recomp itself
+through a live SDL window (640x350 EGA, keyboard). **Open problem: the game board
+stays empty after a puzzle is selected** (see "Next" below).
+
+Run it: `bash scripts/build.sh` (~9 min, parallel now), then
+`PATH=/c/msys64/mingw64/bin:$PATH ./build/bolo.exe work/snapshot.bin`.
+Headless: `SDL_VIDEODRIVER=dummy BOLO_SHOT=1 BOLO_KEYS=$'S\r' ...` writes
+`work/shot_NNN.bmp` every second and types S, Enter, then spaces.
+The build writes large temporaries; if the system drive is short on space, point `TEMP`/`TMP` at a roomier one.
+
+### What was wrong (in the order the boot hit it)
+
+1. **The string-heap blocker was a DOS bug.** QB's memory init (`1283:46C1`) calls
+   `INT 21h/4Ah BX=FFFF` *expecting it to fail* (CF=1, AX=8, BX=max). `dos_compat.c`
+   (and the oracle) let it succeed, so QB went down its out-of-memory path, whose
+   cleanup walked the never-initialised string heap. `res_017D7C` ("block E") is
+   init-table slot `[450A]`, installed by patcher `1B72:00A2` and run by `1B72:0027`.
+2. **Missing function starts.** Oracle call targets were added *after* `discover()`
+   (their tail-jmps never scanned); jcc's leaving a function weren't followed
+   (QB shares tail `ret`s); the QB→BASIC-main handoff is a `retf` to `0100:0030`,
+   which the oracle's call-target collector didn't record. All fixed; jcc targets
+   are boundary-checked and code-only, because junk decodes as plausible jcc's.
+3. **Bogus starts.** The raw `9A/EA` byte scan registers far pointers found inside
+   data/instructions (0x15689 cut `res_015650` mid-`call`) — now filtered to code
+   segments; a near-jmp target must fit its segment (res_01240D got seg 0100).
+4. **lift16 (pcrecomp) bugs:** `lahf` bit 1, rotate OF, `sar` CF for counts ≥ width,
+   `iret` not popping its frame (opt-in `lifter.iret_frame`), far calls pushed a
+   stale `cpu->cs`, and civ's `seg*16+off-0x14` far-call heuristic bound
+   `call 1AB4:0024` to `res_01AB50` (bolo now sets `lifter.far_base = 0`).
+5. **8087 emulator.** QB encodes x87 as `INT 34h-3Dh`; the decoder read the modrm
+   as the next instruction (`CD 37 07` = `fild [bx]`, not `pop es`). New:
+   `decode16.EMU87_INTS` + `lifter.x87` lift them onto an x87 model in
+   `cpu.h`/`cpu.c` (`gcc -DX87_SELFTEST ...` checks it).
+6. **BIOS/EGA gaps:** equipment word, CRTC base (`0040:0063`), `INT 1Ah` ticks,
+   `INT 11h`, EGA read mode 1 (the PCX loader's `and es:[di],ah` trick — this was
+   why 391k writes produced a black screen), write modes 1/3 + ALU op, palette
+   (`INT 10h/10h`, port 3C0), CRTC start (page flips), and the 8x14 graphics font
+   the text blitter reads via `0040:0085` + the `INT 43h` vector (built from
+   `font8x8.h` at C000:1000; `INT 10h/1130h` returns it).
+
+### The differential loop (how every fix above was found)
+
+`python tools/uni_original.py --enter-trace` vs `BOLO_TRACE=1 ./build/bolo.exe`,
+compare function-entry lines (address + regs incl. SP). The oracle now mirrors
+dos_compat's BIOS/DOS answers, vectors the emulator INTs through the program's
+IVT, skips loop back-edges onto a start, and takes `UNI_ECAP` (trace length).
+It agreed with the recomp for 60k+ entries; it stops being useful at the first
+file *create* (`BOLO3.SCR`) — the oracle has no create/write.
+
+### Next
+
+- **Empty game board.** After selecting a puzzle the game reads `BOLO3.OV2` through
+  the PCX loader (tile sheet, drawn at `[0x3B9E]` page offset), then draws with
+  `01655D` (write mode 2), `01871B` (write mode 1, page copy), `00FE12`/`0103A2`.
+  Nothing lands on the board. Suspects: GET/PUT of the tile sheet, the page copy
+  direction, or an x87 value (positions). `BOLO_EGASTAT=1` prints a writer
+  histogram. Giving the oracle file create/write + scripted keys would let the
+  differential loop reach this point again.
+- The menu bar shows only the red hotkeys (O T S Q); may be the design — unverified.
+- The game writes `BOLO3.SCR` into `original/` (its own directory).
+
+
 ## ★★★ (2026-09-12, relift session): the recomp now REPRODUCES THE ORACLE's state
 
 Relifted against current pcrecomp (the driver had been pinned to a dead drive for

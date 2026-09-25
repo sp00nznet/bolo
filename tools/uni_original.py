@@ -85,11 +85,14 @@ def main():
     QB_ENTRY = (LOAD_SEG + 0x2011)      # the QB startup segment (post-PKLITE)
 
     ENTER_TRACE = "--enter-trace" in sys.argv
+    ECAP = int(_osn.environ.get("UNI_ECAP", "40000"))   # enter-trace length
     starts = set()
     if ENTER_TRACE:
         import re as _re
         for m in _re.finditer(r"0x([0-9A-Fa-f]+)UL", open("src/recomp/gen/recomp_dispatch.c").read()):
             starts.add(int(m.group(1), 16))
+    _ss = sorted(starts)
+    next_start = dict(zip(_ss, _ss[1:]))
 
     import os as _os2
     HEAPT = set(int(x, 0) for x in _os2.environ.get("UNI_HEAPTRACE", "").split(",") if x)
@@ -117,8 +120,20 @@ def main():
             if op == 0xFF:
                 reg = (uc.mem_read(i + 1, 1)[0] >> 3) & 7
                 is_call = reg in (2, 3)
+            if op == 0xEA:                           # jmp far imm
+                is_call = True
+            if op == 0xFF and ((uc.mem_read(i + 1, 1)[0] >> 3) & 7) in (4, 5):
+                is_call = True                       # jmp near/far indirect
+            if op in (0xCA, 0xCB):                   # retf: push/push/retf handoff
+                # an ordinary far return lands just after a call; only a target
+                # that no call precedes is a handoff (QB -> the BASIC main program)
+                b = bytes(uc.mem_read(address - 5, 5))
+                is_call = not (b[0] == 0x9A or b[2] == 0xE8 or
+                               (b[3] == 0xFF and (b[4] >> 3) & 7 in (2, 3)) or
+                               (b[2] == 0xFF and (b[3] >> 3) & 7 in (2, 3)))
             if is_call:
                 st.setdefault("calltgts", {})[address] = uc.reg_read(UC_X86_REG_CS)
+        st["prev2"] = st.get("prev", 0)
         st["prev"] = address
         cs = uc.reg_read(UC_X86_REG_CS)
         if cs != st["last_cs"]:
@@ -145,6 +160,19 @@ def main():
         if "qb_entry" in st and cs == st["qb_entry"][0] and not st.get("at_entry"):
             st["at_entry"] = True
             arena_init()                       # build the DOS MCB arena (faithful DOS)
+            # BIOS data area, same values as dos_init() -- the runtime reads the
+            # equipment word to pick its video path, so an all-zero BDA diverges
+            wr16(0x40, 0x10, 0x0021); wr16(0x40, 0x13, 640)
+            wr8(0x40, 0x49, 0x03);    wr16(0x40, 0x4A, 80); wr16(0x40, 0x63, 0x3D4)
+            # 8x14 EGA font at C000:1000 + INT 43h + char height, as dos_init() builds it
+            import re as _re
+            f8 = [int(x, 16) for x in _re.findall(r"0x([0-9A-Fa-f]{2})\b",
+                  open("src/recomp/platform/font8x8.h", encoding="utf-8").read().split("= {", 1)[1])]
+            rows = [-1, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 7, 7, -1]
+            uc.mem_write(0xC1000, bytes(0 if r < 0 else f8[c * 8 + r]
+                                        for c in range(256) for r in rows))
+            wr16(0, 0x43 * 4, 0x1000); wr16(0, 0x43 * 4 + 2, 0xC000)
+            wr16(0x40, 0x85, 14); wr8(0x40, 0x84, 350 // 14 - 1)
             if HEAPT:
                 # heap-trace mode: just run past the entry (no snapshot/no enter cap)
                 print(f"  [entry] reached; running with HEAPTRACE {sorted(HEAPT)}")
@@ -157,17 +185,20 @@ def main():
             print(f"  [entry] mem[0x1B8A0] (table[0]) = {t0:#06x}")
         if st.get("tracing"):
             lin = (cs << 4) + uc.reg_read(UC_X86_REG_IP)
-            if lin in starts:
-                if st["ecount"] < 200:
+            # a jump back to a start from inside that same function is a loop
+            # iteration, not an entry -- the recomp only logs real entries
+            if lin in starts and not (lin < st["prev2"] < next_start.get(lin, lin)):
+                if st["ecount"] < ECAP:
                     R = UC_X86_REG_AX, UC_X86_REG_BX, UC_X86_REG_CX, UC_X86_REG_DX, \
-                        UC_X86_REG_SI, UC_X86_REG_DI, UC_X86_REG_BP, UC_X86_REG_DS, UC_X86_REG_ES
+                        UC_X86_REG_SI, UC_X86_REG_DI, UC_X86_REG_BP, UC_X86_REG_DS, UC_X86_REG_ES, \
+                        UC_X86_REG_SP
                     v = [uc.reg_read(r) & 0xFFFF for r in R]
-                    print("E %06X cs=%04X:%04X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X bp=%04X ds=%04X es=%04X"
+                    print("E %06X cs=%04X:%04X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X bp=%04X ds=%04X es=%04X sp=%04X"
                           % (lin, cs, uc.reg_read(UC_X86_REG_IP) & 0xFFFF, *v))
                 else:
                     print(f"E {lin:06X}")
                 st["ecount"] += 1
-                if st["ecount"] >= 4000:
+                if st["ecount"] >= ECAP:
                     st["stop"] = "enter-trace done"; uc.emu_stop(); return
         if st.get("at_entry") and st["n"] % 4000000 == 0:
             cs = uc.reg_read(UC_X86_REG_CS); si = uc.reg_read(UC_X86_REG_SI)
@@ -212,20 +243,27 @@ def main():
                 return 0
             mcb = (mcb + 1 + size) & 0xFFFF
     def arena_resize(seg, paras):
+        # mirrors dos_compat.c: grow only into a free next block, else
+        # return the max (QB asks for FFFF expecting exactly that failure)
         mcb = (seg - 1) & 0xFFFF
         ty = rd8(mcb, 0); cur = rd16(mcb, 3)
         if ty not in (0x4D, 0x5A): return -1
+        if paras > cur:
+            nxt = (seg + cur) & 0xFFFF; room = cur
+            if ty == 0x4D and rd16(nxt, 1) == 0: room += 1 + rd16(nxt, 3)
+            if paras > room: return ("max", room)
+            if room > cur:
+                ty = rd8(nxt, 0); mcb_set(mcb, ty, rd16(mcb, 1), room); cur = room
         if paras < cur:
             rem = (seg + paras) & 0xFFFF
             mcb_set(rem, ty, 0, cur - paras - 1); mcb_set(mcb, 0x4D, rd16(mcb, 1), paras)
-        else:
-            wr16(mcb, 3, paras)
         return 0
     R = dict(AX=UC_X86_REG_AX, BX=UC_X86_REG_BX, CX=UC_X86_REG_CX, DX=UC_X86_REG_DX,
              ES=UC_X86_REG_ES, DS=UC_X86_REG_DS, SI=UC_X86_REG_SI, DI=UC_X86_REG_DI)
     def faithful21(ah):
         al = uc.reg_read(R['AX']) & 0xFF
-        if ah == 0x30: setreg16(R['AX'], 0x0005); return True            # DOS 5.0
+        if ah == 0x30:                                                   # DOS 5.0, OEM/serial 0
+            setreg16(R['AX'], 0x0005); setreg16(R['BX'], 0); setreg16(R['CX'], 0); return True
         if ah == 0x25:                                                   # set vector
             n = al; ds = uc.reg_read(R['DS']); dx = uc.reg_read(R['DX'])
             st.setdefault("ivt", {})[n] = (ds << 16) | dx; return True
@@ -240,7 +278,9 @@ def main():
         if ah == 0x49:                                                   # free
             wr16((uc.reg_read(R['ES']) - 1) & 0xFFFF, 1, 0); cf(False); return True
         if ah == 0x4A:                                                   # resize
-            if arena_resize(uc.reg_read(R['ES']), uc.reg_read(R['BX'])) == 0: cf(False)
+            r = arena_resize(uc.reg_read(R['ES']), uc.reg_read(R['BX']))
+            if r == 0: cf(False)
+            elif isinstance(r, tuple): setreg16(R['AX'], 8); setreg16(R['BX'], r[1]); cf(True)
             else: setreg16(R['AX'], 9); cf(True)
             return True
         if ah == 0x52:                                                   # list of lists
@@ -248,20 +288,80 @@ def main():
         if ah == 0x44:                                                   # IOCTL
             if al == 0: setreg16(R['DX'], 0x80D3)
             cf(False); return True
+        if ah == 0x47:                                                   # cwd: root ("")
+            wr8(uc.reg_read(R['DS']), uc.reg_read(R['SI']), 0); cf(False); return True
+        if ah == 0x19:                                                   # current drive: C:
+            setreg16(R['AX'], (uc.reg_read(R['AX']) & 0xFF00) | 2); return True
         if ah == 0x62:                                                   # get PSP
             setreg16(R['BX'], PSP); return True
-        if ah in (0x06, 0x0B):                                           # console: no key
-            if ah == 0x0B: setreg16(R['AX'], (uc.reg_read(R['AX']) & 0xFF00) | 0x00)
-            elif (uc.reg_read(R['DX']) & 0xFF) == 0xFF:
-                fl = uc.reg_read(UC_X86_REG_EFLAGS); uc.reg_write(UC_X86_REG_EFLAGS, fl | 0x40)
-                setreg16(R['AX'], uc.reg_read(R['AX']) & 0xFF00)
+        if ah == 0x2C:                  # replay clock: 1/100 s per call (dos_compat.c)
+            n = st["clk"] = st.get("clk", 0) + 1
+            setreg16(R['CX'], (12 + n // 360000 % 12) << 8 | n // 6000 % 60)
+            setreg16(R['DX'], (n // 100 % 60) << 8 | n % 100)
+            return True
+        def dos_read():                 # extended keys: AL=0, then the scan code
+            if st.get("pend"):
+                v = st["pend"]; st["pend"] = 0; return v
+            k = kbd.pop(0)
+            if k & 0xFF == 0: st["pend"] = k >> 8
+            return k & 0xFF
+        if ah in (0x01, 0x07, 0x08):                                     # blocking read
+            while not (kbd or st.get("pend")): kbd_poll()
+            setreg16(R['AX'], (uc.reg_read(R['AX']) & 0xFF00) | dos_read())
+            return True
+        if ah == 0x06:
+            if (uc.reg_read(R['DX']) & 0xFF) == 0xFF:
+                kbd_poll()
+                fl = uc.reg_read(UC_X86_REG_EFLAGS)
+                if kbd or st.get("pend"):
+                    setreg16(R['AX'], (uc.reg_read(R['AX']) & 0xFF00) | dos_read())
+                    uc.reg_write(UC_X86_REG_EFLAGS, fl & ~0x40)
+                else:
+                    setreg16(R['AX'], uc.reg_read(R['AX']) & 0xFF00)
+                    uc.reg_write(UC_X86_REG_EFLAGS, fl | 0x40)
             cf(False); return True
+        if ah == 0x0B:
+            kbd_poll()
+            setreg16(R['AX'], (uc.reg_read(R['AX']) & 0xFF00) | (0xFF if kbd or st.get("pend") else 0))
+            return True
         return False
 
+    # Keyboard, as dos_compat.c + main.c's feed_keys do it: every input poll
+    # pushes the next UNI_KEYS character (then spaces forever) into a 32-slot
+    # ring, so the same key reaches the same poll on both sides of the diff.
+    keys = list(_os2.environ.get("UNI_KEYS", ""))
+    kbd = []
+    skip = [0]
+    def kbd_poll():                     # `~` = 20 polls, `^U/D/L/R` = arrows (main.c)
+        if skip[0]:
+            skip[0] -= 1; return
+        c = keys.pop(0) if keys else " "
+        if c == "~":
+            skip[0] = 19; return
+        if c == "^" and keys:
+            d = keys.pop(0)
+            if d in "UDLR" and len(kbd) < 31:
+                kbd.append({"U": 0x48, "D": 0x50, "L": 0x4B, "R": 0x4D}[d] << 8)
+            return
+        if len(kbd) < 31:
+            kbd.append((0x1C if ord(c) == 13 else 0x39) << 8 | ord(c))
+    def kbd_wait():
+        while not kbd: kbd_poll()
+        return kbd.pop(0)
+
     handles = {}
+    GAMEDIR = "work/tmp/oracle_game"       # where files the game creates live (fresh per run)
+    import shutil as _sh
+    _sh.rmtree(GAMEDIR, ignore_errors=True); _os2.makedirs(GAMEDIR)
+    DOSTRACE = bool(_os2.environ.get("UNI_DOSTRACE"))
     def hook_intr(uc, intno, _):
         ax = uc.reg_read(UC_X86_REG_AX); ah = (ax >> 8) & 0xFF
         if intno == 0x21:
+            if DOSTRACE and st.get("at_entry"):       # same format as BOLO_DOSTRACE
+                g = lambda r: uc.reg_read(r) & 0xFFFF
+                print("[int21] AH=%02X AL=%02X BX=%04X CX=%04X DX=%04X DS=%04X" % (
+                    ah, ax & 0xFF, g(UC_X86_REG_BX), g(UC_X86_REG_CX),
+                    g(UC_X86_REG_DX), g(UC_X86_REG_DS)))
             if ah == 0x4C:
                 st["stop"] = f"INT21/4C exit {ax & 0xFF}"; uc.emu_stop(); return
             if st.get("at_entry") and faithful21(ah):     # faithful DOS post-entry
@@ -279,15 +379,47 @@ def main():
                 print(f"  *** INT21/3D OPEN '{name}'  (game asset load reached!)")
                 # try to satisfy it from disk so the game keeps going
                 import os
-                path = os.path.join("original", os.path.basename(name))
+                path = os.path.join(GAMEDIR, os.path.basename(name.replace("\\", "/")))
+                if not os.path.exists(path):
+                    path = os.path.join("original", os.path.basename(name.replace("\\", "/")))
                 if os.path.exists(path):
-                    fd = len(handles) + 5; handles[fd] = open(path, "rb")
+                    fd = next(i for i in range(5, 99) if i not in handles)
+                    handles[fd] = open(path, "rb" if (ax & 3) == 0 else "r+b")
                     uc.reg_write(UC_X86_REG_AX, fd); cf(False)
                 else:
                     uc.reg_write(UC_X86_REG_AX, 2); cf(True)   # file not found
-                if len(st["opens"]) >= (999 if HEAPT else 3):
+                if len(st["opens"]) >= (999 if HEAPT or ENTER_TRACE else 3):
                     st["stop"] = "reached asset loading"; uc.emu_stop()
                 return
+            if ah == 0x3C and st.get("at_entry"):  # create: files the game writes
+                import os                          # go to a scratch dir, not original/
+                ds = uc.reg_read(UC_X86_REG_DS); dx = uc.reg_read(UC_X86_REG_DX)
+                name = bytes(uc.mem_read((ds << 4) + dx, 64)).split(b"\x00")[0].decode("latin1")
+                fd = next(i for i in range(5, 99) if i not in handles)
+                handles[fd] = open(os.path.join(GAMEDIR, os.path.basename(name.replace("\\", "/"))), "w+b")
+                uc.reg_write(UC_X86_REG_AX, fd); cf(False); return
+            if ah == 0x40 and st.get("at_entry"):
+                bx = uc.reg_read(UC_X86_REG_BX); cx = uc.reg_read(UC_X86_REG_CX)
+                ds = uc.reg_read(UC_X86_REG_DS); dx = uc.reg_read(UC_X86_REG_DX)
+                if bx in handles:
+                    handles[bx].write(bytes(uc.mem_read((ds << 4) + dx, cx)))
+                uc.reg_write(UC_X86_REG_AX, cx); cf(False); return
+            if ah in (0x3E, 0x3F, 0x42) and st.get("at_entry"):   # file I/O, like dos_compat.c
+                bx = uc.reg_read(UC_X86_REG_BX); f = handles.get(bx)
+                if f is None:
+                    uc.reg_write(UC_X86_REG_AX, 6); cf(True); return      # invalid handle
+                if ah == 0x3E:
+                    f.close(); del handles[bx]; cf(False); return
+                if ah == 0x3F:
+                    cx = uc.reg_read(UC_X86_REG_CX); ds = uc.reg_read(UC_X86_REG_DS)
+                    data = f.read(cx)
+                    uc.mem_write((ds << 4) + uc.reg_read(UC_X86_REG_DX), data)
+                    uc.reg_write(UC_X86_REG_AX, len(data)); cf(False); return
+                pos = (uc.reg_read(UC_X86_REG_CX) << 16) | uc.reg_read(UC_X86_REG_DX)
+                if pos & 0x80000000: pos -= 1 << 32
+                f.seek(pos, ax & 0xFF); p = f.tell()
+                uc.reg_write(UC_X86_REG_AX, p & 0xFFFF); uc.reg_write(UC_X86_REG_DX, p >> 16)
+                cf(False); return
             # Faithful INT 21h ONLY after the real entry (during PKLITE+QB startup we
             # must keep the known-good stub behavior that reaches the entry).
             if st.get("at_entry"):
@@ -298,12 +430,79 @@ def main():
                 if ah == 0x62:                   # get PSP -> BX (dos_compat: 0x00F0)
                     uc.reg_write(UC_X86_REG_BX, 0x00F0); cf(False); return
             cf(False); return                    # other INT 21h -> succeed-ish
+        if intno == 0x10 and st.get("at_entry"):   # mirrors bios_int10() in dos_compat.c
+            al = ax & 0xFF; bx = uc.reg_read(UC_X86_REG_BX)
+            if ah == 0x12 and (bx & 0xFF) == 0x10:
+                setreg16(R['BX'], 0x0003); setreg16(R['CX'], 0x0009)
+            elif ah == 0x1A:
+                setreg16(R['AX'], (ax & 0xFF00) | 0x1A); setreg16(R['BX'], 0x0004)
+            elif ah == 0x11 and al == 0x30:
+                setreg16(R['ES'], 0xC000); uc.reg_write(UC_X86_REG_BP, 0x1000)
+                setreg16(R['CX'], rd16(0x40, 0x85))
+                setreg16(R['DX'], (uc.reg_read(UC_X86_REG_DX) & 0xFF00) | rd8(0x40, 0x84))
+            elif ah == 0x10 and al == 0x02:
+                pass                                # palette: no display here
+            elif ah == 0x00:
+                wr8(0x40, 0x49, al)
+                if al in (0x0D, 0x0E, 0x0F, 0x10):
+                    wr16(0x40, 0x4C, 0x8000); wr16(0x40, 0x4E, 0)
+            elif ah == 0x02:
+                dx = uc.reg_read(UC_X86_REG_DX); wr8(0x40, 0x50, dx & 0xFF); wr8(0x40, 0x51, dx >> 8)
+            elif ah == 0x03:
+                setreg16(R['DX'], rd8(0x40, 0x50) | (rd8(0x40, 0x51) << 8))
+                setreg16(R['CX'], 0)
+            elif ah == 0x0F:
+                m = rd8(0x40, 0x49) or 3
+                setreg16(R['AX'], ((40 if m == 0x13 else 80) << 8) | m); setreg16(R['BX'], bx & 0xFF)
+            return
+        if 0x34 <= intno <= 0x3D and st.get("at_entry"):
+            # QB's 8087 emulator. With an interrupt hook installed Unicorn no
+            # longer vectors INT n through the IVT, so do what the CPU does:
+            # push FLAGS/CS/IP and jump to the handler the program set (21h/25h)
+            v = st.get("ivt", {}).get(intno)
+            if v and HEAPT:                    # a vectored handler is a function start too
+                st.setdefault("calltgts", {})[(v >> 16) * 16 + (v & 0xFFFF)] = v >> 16
+            if v:
+                sp = (uc.reg_read(UC_X86_REG_SP) - 6) & 0xFFFF
+                ss = uc.reg_read(UC_X86_REG_SS)
+                uc.mem_write(ss * 16 + sp, struct.pack("<HHH", uc.reg_read(UC_X86_REG_IP),
+                             uc.reg_read(UC_X86_REG_CS), uc.reg_read(UC_X86_REG_EFLAGS) & 0xFFFF))
+                uc.reg_write(UC_X86_REG_SP, sp)
+                uc.reg_write(UC_X86_REG_CS, v >> 16); uc.reg_write(UC_X86_REG_IP, v & 0xFFFF)
+                uc.reg_write(UC_X86_REG_EFLAGS, uc.reg_read(UC_X86_REG_EFLAGS) & ~0x300)  # IF, TF
+            return
+        if intno == 0x1A and st.get("at_entry") and ah == 0:   # BIOS ticks: no timer
+            t = st["ticks"] = st.get("ticks", 0) + 1           # here, so every read is
+            setreg16(R['DX'], t & 0xFFFF); setreg16(R['CX'], t >> 16)   # one tick later
+            setreg16(R['AX'], ax & 0xFF00)
+            return
+        if intno == 0x16 and st.get("at_entry"):   # keyboard BIOS, like bios_int16()
+            fl = uc.reg_read(UC_X86_REG_EFLAGS)
+            if ah in (0x00, 0x10):
+                setreg16(R['AX'], kbd_wait())
+            elif ah in (0x01, 0x11):
+                kbd_poll()
+                if kbd: setreg16(R['AX'], kbd[0]); uc.reg_write(UC_X86_REG_EFLAGS, fl & ~0x40)
+                else: uc.reg_write(UC_X86_REG_EFLAGS, fl | 0x40)
+            elif ah == 0x02:
+                setreg16(R['AX'], ax & 0xFF00)
+            return
+        if intno == 0x11 and st.get("at_entry"):   # equipment word, like dos_compat.c:
+            setreg16(R['AX'], rd16(0x40, 0x10))     # no 8087, so QB uses its emulator
+            return
         if intno == 0x20:
             st["stop"] = "INT 20h"; uc.emu_stop(); return
         # other INTs (10h video, 16h kbd, 1Ah timer): ignore/stub
 
     uc.hook_add(UC_HOOK_CODE, hook_code)
     uc.hook_add(UC_HOOK_INTR, hook_intr)
+
+    def hook_in(uc, port, size, _):          # 3DA: retrace toggles, like video.c
+        if port == 0x3DA:
+            st["vr"] = st.get("vr", 0) ^ 0x09
+            return st["vr"]
+        return 0
+    uc.hook_add(UC_HOOK_INSN, hook_in, None, 1, 0, UC_X86_INS_IN)
 
     import os as _os
     if _os.environ.get("UNI_EGA"):       # detect EGA framebuffer writes (drawing)

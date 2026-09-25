@@ -15,6 +15,7 @@
 #include "cpu.h"
 #include <stdlib.h>
 #include "recomp/ega.h"
+#include "recomp/dos_compat.h"
 
 typedef struct { unsigned long addr; void (*fn)(CPU*); } dispatch_t;
 extern const dispatch_t g_dispatch[];
@@ -51,19 +52,55 @@ static int g_in_timer = 0;
 long g_timer_fires = 0;
 
 /* Periodically fire the game's installed timer ISR (INT 1Ch / IRQ0 INT 8) so the
- * frame-timing wait loops advance. The lifter renders IRET as a bare return, so
- * we just dispatch to the installed vector. */
+ * frame-timing wait loops advance. IRET pops a FLAGS/CS/IP frame (lift_bolo sets
+ * iret_frame), so push one like the CPU would; SP is restored afterwards in case
+ * the ISR chained somewhere that never IRETs. */
+static void fire_isr(CPU *c, uint32_t v)
+{
+    uint16_t sp = c->sp;
+    push16(c, (uint16_t)(c->flags | 0x0002)); push16(c, c->cs); push16(c, 0xFFFF);
+    recomp_dispatch(c, (uint16_t)(v >> 16), (uint16_t)v);
+    c->sp = sp;
+}
+/* IRQ0 at the PC's real 18.2 Hz, by wall clock. Checked from function entry and
+ * from every loop back-edge (RECOMP_TICK), so a spin loop waiting on the tick
+ * count still sees it move. Held off while IF is clear, as the PIC would. */
+#include <windows.h>
 static void maybe_fire_timer(void)
 {
-    if (g_in_timer || !g_dbg_cpu) return;
-    if (g_enter_n % 150 != 0) return;
+    static ULONGLONG next;
+    if (g_host_pump) g_host_pump();
+    if (g_in_timer || !g_dbg_cpu || !(g_dbg_cpu->flags & FLAG_IF) || g_deterministic > 0) return;
+    ULONGLONG now = GetTickCount64();
+    if (!next) next = now;
+    if (now < next) return;
+    next = (now - next > 500) ? now + 55 : next + 55;   /* after a stall, don't burst */
     g_in_timer = 1;
     dos_tick(g_dbg_cpu);
     uint32_t v = dos_get_vector(0x1C);
-    if (v) { g_timer_fires++; recomp_dispatch(g_dbg_cpu, (uint16_t)(v >> 16), (uint16_t)v); }
+    if (v) { g_timer_fires++; fire_isr(g_dbg_cpu, v); }
     v = dos_get_vector(0x08);
-    if (v) recomp_dispatch(g_dbg_cpu, (uint16_t)(v >> 16), (uint16_t)v);
+    if (v) fire_isr(g_dbg_cpu, v);
     g_in_timer = 0;
+}
+void recomp_tick_now(void) { maybe_fire_timer(); }
+
+/* An 8087-emulator INT (34h-3Dh), done as the CPU does it: push FLAGS, CS and
+ * the real IP just past `CD nn`, clear IF, enter the handler the program
+ * installed. QB's emulator reads the operand bytes at CS:IP and IRETs; the
+ * lifted code then carries on past the whole instruction. */
+void x87_emu_int(CPU *c, uint8_t n, uint16_t cs, uint16_t ip)
+{
+    uint32_t v = dos_get_vector(n);
+    if (!v) { static int w; if (!w++) fprintf(stderr, "[x87] INT %02Xh has no handler\n", n); return; }
+    push16(c, (uint16_t)(c->flags | 0x0002)); push16(c, cs); push16(c, ip);
+    /* (IF left alone: the handler starts with sti anyway) */
+    recomp_dispatch(c, (uint16_t)(v >> 16), (uint16_t)v);
+}
+void recomp_tick(void)
+{
+    static unsigned n;
+    if ((++n & 1023) == 0) maybe_fire_timer();
 }
 
 void *g_miss_site = 0;          /* C return addr of the last dispatch call site */
@@ -94,12 +131,12 @@ void mem_watch_hit(uint32_t a, uint16_t val, int width)
 
 void recomp_enter(unsigned long addr)
 {
-    if (g_trace && (g_enter_n < 4000 || g_enter_n % 500 == 0)) {
-        if (g_dbg_cpu && g_enter_n < 200) {
+    if (g_trace && (g_enter_n < 400000 || g_enter_n % 500 == 0)) {
+        if (g_dbg_cpu && g_enter_n < 400000) {
             CPU *c = g_dbg_cpu;
             fprintf(stderr, "E %06lX ax=%04X bx=%04X cx=%04X dx=%04X si=%04X "
-                    "di=%04X bp=%04X ds=%04X es=%04X\n", addr, c->ax, c->bx,
-                    c->cx, c->dx, c->si, c->di, c->bp, c->ds, c->es);
+                    "di=%04X bp=%04X ds=%04X es=%04X sp=%04X\n", addr, c->ax, c->bx,
+                    c->cx, c->dx, c->si, c->di, c->bp, c->ds, c->es, c->sp);
         } else {
             fprintf(stderr, "E %06lX\n", addr);
         }
@@ -154,8 +191,12 @@ void recomp_enter(unsigned long addr)
             }
         }
     }
-    maybe_fire_timer();
-    if (g_enter_n == 3000000) {
+    recomp_tick();
+    /* BOLO_STOPAT=N: dump state and stop after N function entries (debug;
+     * this used to be hard-wired to 3,000,000 and ended every long run) */
+    static long stop_at = -1;
+    if (stop_at < 0) { const char *e = getenv("BOLO_STOPAT"); stop_at = e ? atol(e) : 0; }
+    if (stop_at && g_enter_n == stop_at) {
         ega_dump("work/ega_planes.bin");
         if (g_dbg_cpu) {                        /* also dump text screen (B800) */
             FILE *t = fopen("work/text.bin", "wb");

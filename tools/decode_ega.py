@@ -5,15 +5,16 @@ from PIL import Image
 
 W, H = 640, 350
 BPR = W // 8                      # 80 bytes per row per plane
-PSZ = BPR * H                     # 28000 bytes per plane
 EGA = [(0,0,0),(0,0,170),(0,170,0),(0,170,170),(170,0,0),(170,0,170),
        (170,85,0),(170,170,170),(85,85,85),(85,85,255),(85,255,85),
        (85,255,255),(255,85,85),(255,85,255),(255,255,85),(255,255,255)]
 
 src = sys.argv[1] if len(sys.argv) > 1 else "work/ega_planes.bin"
 out = sys.argv[2] if len(sys.argv) > 2 else "work/screen.png"
+start = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0   # page offset (CRTC start)
 d = open(src, "rb").read()
-planes = [d[p*PSZ:(p+1)*PSZ] for p in range(4)]
+PSZ = len(d) // 4                 # 28000 (one page) or 65536 (whole plane)
+planes = [d[p*PSZ + start:(p+1)*PSZ] for p in range(4)]
 img = Image.new("RGB", (W, H))
 px = img.load()
 nonzero = 0

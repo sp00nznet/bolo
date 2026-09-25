@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <math.h>     /* lifted x87 code: fabs, sqrt, nearbyint, ... */
 
 /* ---------- Flag bits ---------- */
 #define FLAG_CF  0x0001  /* Carry */
@@ -496,12 +497,10 @@ static inline void bcd_aad(CPU *cpu, uint8_t base)
  * beacon in icall.c, so leave this a no-op and keep the existing one. */
 #define RECOMP_ENTER(name) ((void)0)
 
-/* RECOMP_TICK lands on every loop back-edge so the project can run the guest's
- * timer ISR while lifted code is still inside a C loop. bolo currently pumps
- * the timer from recomp_enter() every 150 entries instead, which cannot reach a
- * spin loop that never leaves its function -- worth switching to, but that is a
- * behaviour change, not part of the relift. */
-#define RECOMP_TICK(cpu) ((void)0)
+/* RECOMP_TICK lands on every loop back-edge so the guest's timer ISR (and the
+ * host window) keep running while lifted code spins inside one C loop. */
+void recomp_tick(void);
+#define RECOMP_TICK(cpu) recomp_tick()
 
 void recomp_div0(const char *what);   /* divide-by-zero trap (cpu.c) */
 
@@ -541,5 +540,24 @@ void cpu_free(CPU *cpu);
 
 /* Load binary into memory at segment:offset */
 int cpu_load(CPU *cpu, const char *path, uint16_t seg, uint16_t off);
+
+/* ─── x87 ────────────────────────────────────────────────────────────────
+ * The lifter turns the 8087 emulator interrupts (INT 34h-3Dh) and real ESC
+ * opcodes into calls on this model. Registers are doubles: the program loads
+ * and stores 32/64-bit reals and 16/32-bit ints, which a double holds exactly;
+ * 80-bit loads/stores convert. One FPU, so one global state (x87.c). */
+typedef struct { double st[8]; int top; uint16_t sw, cw; } X87;
+extern X87 g_x87;
+#define X87_ST(i) g_x87.st[(g_x87.top + (i)) & 7]
+static inline void x87_push(double v) { g_x87.top = (g_x87.top - 1) & 7; X87_ST(0) = v; }
+static inline void x87_pop(void) { g_x87.top = (g_x87.top + 1) & 7; }
+/* kind: 4/8/10 = real32/64/80, -2/-4/-8 = int16/32/64 */
+double   x87_rd(CPU *cpu, uint16_t seg, uint16_t off, int kind);
+void     x87_wr(CPU *cpu, uint16_t seg, uint16_t off, int kind, double v);
+void     x87_cmp(double a, double b);        /* sets C3/C2/C0 like FCOM */
+uint16_t x87_sw(void);                      /* status word with TOP folded in */
+void     x87_arith(int op, double *dst, double src);   /* reg field: add,mul,-,-,sub,subr,div,divr */
+void     x87_unhandled(const char *what);
+void     x87_emu_int(CPU *cpu, uint8_t n, uint16_t cs, uint16_t ip);   /* icall.c */
 
 #endif /* CIV_RECOMP_CPU_H */

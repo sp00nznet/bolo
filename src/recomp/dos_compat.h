@@ -64,6 +64,9 @@ void int_handler(CPU *cpu, uint8_t num);  /* Generic interrupt */
 /* Port I/O dispatch */
 void port_out8(CPU *cpu, uint16_t port, uint8_t value);
 uint8_t port_in8(CPU *cpu, uint16_t port);
+extern void (*g_host_pump)(void);   /* poll input + present, throttled by the host */
+void recomp_tick_now(void);
+extern int g_deterministic;          /* BOLO_DETERMINISTIC replay mode */         /* icall.c: fire the timer IRQ if one is due */
 void port_out16(CPU *cpu, uint16_t port, uint16_t value);
 uint16_t port_in16(CPU *cpu, uint16_t port);
 

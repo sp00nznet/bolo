@@ -18,10 +18,12 @@
 
 #include "recomp/dos_compat.h"
 #include "recomp/ega.h"
+#include "platform/font8x8.h"   /* source for the 8x14 EGA graphics font */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 /* Global DOS state - accessible from interrupt handlers */
 static DosState *g_dos = NULL;
@@ -49,8 +51,13 @@ static void dos_path_to_native(const CPU *cpu, uint16_t seg, uint16_t off,
     }
     dos_path[i] = 0;
 
-    /* Prepend game directory */
-    snprintf(out, out_size, "%s/%s", g_dos->game_dir, dos_path);
+    /* The game directory is the root of the current drive: the game opens
+     * "C:\BOLO3.OV4" (drive from INT 21h/19h) as well as bare names, so drop a
+     * drive letter and a leading root slash. */
+    const char *p = dos_path;
+    if (p[0] && p[1] == ':') p += 2;
+    while (*p == '/') p++;
+    snprintf(out, out_size, "%s/%s", g_dos->game_dir, p);
 }
 
 /* ─── DOS File Handle Management ─── */
@@ -105,19 +112,35 @@ static void arena_init(CPU *cpu, uint16_t psp, uint16_t memtop)
 }
 
 /* resize the block whose data starts at `seg` to `paras`; split off a free
- * remainder if it shrank. returns 0 on ok. */
-static int arena_resize(CPU *cpu, uint16_t seg, uint16_t paras)
+ * remainder if it shrank. returns 0 on ok, -1 bad block, or 1 if it cannot
+ * grow that far -- then *max is the largest size it could have.
+ *
+ * Growing only works into a free block directly after this one. QB's startup
+ * asks for FFFF paragraphs *expecting* this to fail, and takes the returned
+ * maximum; a resize that always succeeds sends it down the out-of-memory path,
+ * whose cleanup walks a string heap nothing has initialized yet. */
+static int arena_resize(CPU *cpu, uint16_t seg, uint16_t paras, uint16_t *max)
 {
     uint16_t mcb = (uint16_t)(seg - 1);
     uint8_t  type = mem_read8(cpu, mcb, 0);
     uint16_t cur = mem_read16(cpu, mcb, 3);
     if (type != MCB_M && type != MCB_Z) return -1;
+    if (paras > cur) {                                  /* grow: absorb a free next block */
+        uint16_t nxt = (uint16_t)(seg + cur);
+        uint32_t room = cur;
+        if (type == MCB_M && mem_read16(cpu, nxt, 1) == 0)
+            room += 1u + mem_read16(cpu, nxt, 3);
+        if (paras > room) { *max = (uint16_t)room; return 1; }
+        if (room > cur) {                               /* merge, then shrink back below */
+            type = mem_read8(cpu, nxt, 0);
+            mcb_set(cpu, mcb, type, mem_read16(cpu, mcb, 1), (uint16_t)room);
+            cur = (uint16_t)room;
+        }
+    }
     if (paras < cur) {                                  /* shrink -> free remainder */
         uint16_t rem_mcb = (uint16_t)(seg + paras);
         mcb_set(cpu, rem_mcb, type, 0 /*free*/, (uint16_t)(cur - paras - 1));
         mcb_set(cpu, mcb, MCB_M, mem_read16(cpu, mcb, 1), paras);
-    } else {
-        mem_write16(cpu, mcb, 3, paras);                /* grow (we always have room) */
     }
     return 0;
 }
@@ -150,6 +173,7 @@ static uint16_t arena_alloc(CPU *cpu, uint16_t psp, uint16_t paras)
 
 void dos_init(DosState *ds, CPU *cpu, const char *game_dir)
 {
+    g_deterministic = getenv("BOLO_DETERMINISTIC") != NULL;
     memset(ds, 0, sizeof(*ds));
     strncpy(ds->game_dir, game_dir, sizeof(ds->game_dir) - 1);
     g_dos = ds;
@@ -176,6 +200,24 @@ void dos_init(DosState *ds, CPU *cpu, const char *game_dir)
     mem_write8(cpu, 0x0040, 0x0049, 0x03);  /* Mode 3: 80x25 text */
     /* Screen columns at 0040:004A */
     mem_write16(cpu, 0x0040, 0x004A, 80);
+    /* CRTC base port at 0040:0063 -- the game's retrace wait polls [0x63]+6 */
+    mem_write16(cpu, 0x0040, 0x0063, 0x03D4);
+
+    /* EGA graphics font: the game's text blitter takes the glyph height from
+     * 0040:0085 and the glyphs from the INT 43h vector, as an EGA BIOS sets
+     * them for 640x350. Without them the height is 0 (a 65536-row loop across
+     * video memory). No ROM here, so build an 8x14 font from the 8x8 one:
+     * a blank row, the 8 rows scaled to 12, a blank row. */
+    mem_write16(cpu, 0x0040, 0x0085, 14);
+    mem_write8(cpu, 0x0040, 0x0084, 350 / 14 - 1);   /* text rows - 1 */
+    for (int c = 0; c < 256; c++)
+        for (int r = 0; r < 14; r++) {
+            static const int8_t src[14] = { -1, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 7, 7, -1 };
+            uint8_t v = src[r] < 0 ? 0 : font8x8_cp437[c][src[r]];
+            mem_write8(cpu, 0xC000, (uint16_t)(0x1000 + c * 14 + r), v);
+        }
+    mem_write16(cpu, 0x0000, 0x43 * 4, 0x1000);
+    mem_write16(cpu, 0x0000, 0x43 * 4 + 2, 0xC000);
 
     ds->mem_top = 0x9FFF;  /* Top of available conventional memory */
 
@@ -189,6 +231,24 @@ void dos_init(DosState *ds, CPU *cpu, const char *game_dir)
 }
 
 /* ─── INT 21h - DOS API ─── */
+
+void (*g_host_pump)(void);   /* set by main: poll input + present a frame */
+/* BOLO_DETERMINISTIC: clocks advance per call, not by wall time, and no timer
+ * IRQ -- the same machine uni_original.py models, so traces can be diffed */
+int g_deterministic = -1;
+
+/* DOS console input returns an extended key (arrows, F-keys) as two reads:
+ * AL=0, then the scan code. BIOS keeps it as one word, so hold the second
+ * half here between calls. */
+static uint8_t g_pending_scan;
+static int dos_key_avail(void) { return g_pending_scan || keyboard_available(&g_dos->keyboard); }
+static uint8_t dos_key_read(void)
+{
+    if (g_pending_scan) { uint8_t s = g_pending_scan; g_pending_scan = 0; return s; }
+    uint16_t key = keyboard_read(&g_dos->keyboard);
+    if ((key & 0xFF) == 0) g_pending_scan = (uint8_t)(key >> 8);
+    return (uint8_t)(key & 0xFF);
+}
 
 void dos_int21(CPU *cpu)
 {
@@ -210,12 +270,12 @@ void dos_int21(CPU *cpu)
     case 0x01: /* Character input with echo (blocking) */ {
         KeyboardState *ks = &g_dos->keyboard;
         /* Block until a key is available, pumping the event loop */
-        while (!keyboard_available(ks)) {
+        (void)ks;
+        while (!dos_key_avail()) {
             if (g_dos->poll_events)
                 g_dos->poll_events(g_dos->platform_ctx, g_dos, cpu);
         }
-        uint16_t key = keyboard_read(ks);
-        cpu->al = (uint8_t)(key & 0xFF);
+        cpu->al = dos_key_read();
         break;
     }
 
@@ -230,12 +290,12 @@ void dos_int21(CPU *cpu)
     case 0x07: {
         KeyboardState *ks = &g_dos->keyboard;
         /* Block until a key is available, pumping the event loop */
-        while (!keyboard_available(ks)) {
+        (void)ks;
+        while (!dos_key_avail()) {
             if (g_dos->poll_events)
                 g_dos->poll_events(g_dos->platform_ctx, g_dos, cpu);
         }
-        uint16_t key = keyboard_read(ks);
-        cpu->al = (uint8_t)(key & 0xFF);
+        cpu->al = dos_key_read();
         break;
     }
 
@@ -243,8 +303,8 @@ void dos_int21(CPU *cpu)
         if (cpu->dl == 0xFF) {                 /* input (non-blocking) */
             if (g_dos->poll_events)
                 g_dos->poll_events(g_dos->platform_ctx, g_dos, cpu);
-            if (keyboard_available(&g_dos->keyboard)) {
-                cpu->al = (uint8_t)(keyboard_read(&g_dos->keyboard) & 0xFF);
+            if (dos_key_avail()) {
+                cpu->al = dos_key_read();
                 cpu->flags &= ~FLAG_ZF;        /* key available */
             } else {
                 cpu->al = 0;
@@ -289,7 +349,7 @@ void dos_int21(CPU *cpu)
     case 0x0B: /* Check keyboard input status */
         if (g_dos->poll_events)
             g_dos->poll_events(g_dos->platform_ctx, g_dos, cpu);
-        cpu->al = keyboard_available(&g_dos->keyboard) ? 0xFF : 0x00;
+        cpu->al = dos_key_avail() ? 0xFF : 0x00;
         break;
 
     case 0x0E: /* Select disk */
@@ -325,12 +385,23 @@ void dos_int21(CPU *cpu)
     }
 
     case 0x2C: { /* Get time */
-        time_t t = time(NULL);
+        /* hundredths matter: the game paces its main loop on this clock,
+         * and a constant 0 made it step once a second */
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        if (g_deterministic) {          /* replay mode: 1/100 s per call, from 12:00 */
+            static unsigned long n;
+            n++;
+            cpu->ch = (uint8_t)(12 + n / 360000 % 12); cpu->cl = (uint8_t)(n / 6000 % 60);
+            cpu->dh = (uint8_t)(n / 100 % 60); cpu->dl = (uint8_t)(n % 100);
+            break;
+        }
+        time_t t = tv.tv_sec;
         struct tm *tm = localtime(&t);
         cpu->ch = (uint8_t)tm->tm_hour;
         cpu->cl = (uint8_t)tm->tm_min;
         cpu->dh = (uint8_t)tm->tm_sec;
-        cpu->dl = 0;  /* hundredths */
+        cpu->dl = (uint8_t)(tv.tv_usec / 10000);
         break;
     }
 
@@ -380,6 +451,8 @@ void dos_int21(CPU *cpu)
             default: mode = "rb"; break;
         }
         FILE *f = fopen(path, mode);
+        if (getenv("BOLO_DOSTRACE"))
+            fprintf(stderr, "[int21] open '%s' -> %s\n", path, f ? "ok" : "not found");
         if (f) {
             int handle = dos_alloc_handle(f);
             if (handle >= 0) {
@@ -493,11 +566,17 @@ void dos_int21(CPU *cpu)
         break;
 
     case 0x4A: /* Resize memory block (ES = block, BX = new paragraphs) */
-        if (arena_resize(cpu, cpu->es, cpu->bx) == 0) {
+    {
+        uint16_t max = 0;
+        int r = arena_resize(cpu, cpu->es, cpu->bx, &max);
+        if (r == 0) {
             cpu->flags &= ~FLAG_CF;
+        } else if (r == 1) {
+            cpu->ax = 8; cpu->bx = max; cpu->flags |= FLAG_CF;  /* insufficient memory */
         } else {
             cpu->ax = 9; cpu->flags |= FLAG_CF;           /* invalid block */
         }
+    }
         break;
 
     case 0x52: /* Get list of lists -> ES:BX; [ES:BX-2] = first MCB segment */
@@ -533,12 +612,32 @@ void dos_int21(CPU *cpu)
 
 void bios_int10(CPU *cpu)
 {
+    static int trace = -1;
+    if (trace < 0) trace = getenv("BOLO_INT10") != NULL;
+    if (trace) fprintf(stderr, "[int10] AH=%02X AL=%02X BX=%04X CX=%04X DX=%04X\n",
+                       cpu->ah, cpu->al, cpu->bx, cpu->cx, cpu->dx);
     switch (cpu->ah) {
     case 0x12: /* EGA/VGA configuration / alternate select */
         if (cpu->bl == 0x10) {        /* get EGA info -> report EGA present */
             cpu->bh = 0x00;           /* color mode */
             cpu->bl = 0x03;           /* 256K EGA memory */
             cpu->cx = 0x0009;         /* feature/switch settings */
+        }
+        return;
+    case 0x10: /* Palette: AL=0 set one register (BL=reg, BH=value),
+                *          AL=2 set all 16 + overscan from ES:DX */
+        if (cpu->al == 0x00) ega_set_palette(cpu->bl, cpu->bh);
+        else if (cpu->al == 0x02)
+            for (int i = 0; i < 16; i++)
+                ega_set_palette(i, mem_read8(cpu, cpu->es, (uint16_t)(cpu->dx + i)));
+        return;
+    case 0x11: /* AL=30h: font info -> ES:BP, CX = char height, DL = rows-1.
+                * Every pointer is the 8x14 font dos_init built at C000:1000
+                * (BH=1 is the INT 43h vector, which points there too). */
+        if (cpu->al == 0x30) {
+            cpu->es = 0xC000; cpu->bp = 0x1000;
+            cpu->cx = mem_read16(cpu, 0x0040, 0x0085);
+            cpu->dl = mem_read8(cpu, 0x0040, 0x0084);
         }
         return;
     case 0x1A: /* Get/set display combination code */
@@ -557,6 +656,8 @@ void bios_int10(CPU *cpu)
                    cpu->al == 0x0F) {
             /* EGA graphics modes (SCREEN 9 = mode 0x10, 640x350x16) */
             ega_set_mode();
+            mem_write16(cpu, 0x0040, 0x004C, 0x8000);   /* page size: 2 pages in 64K */
+            mem_write16(cpu, 0x0040, 0x004E, 0);        /* current page offset */
         } else if (cpu->al == 0x03) {
             /* Mode 3: 80x25 text - clear text mode buffer */
             memset(&cpu->mem[TEXT_MODE_BASE], 0, TEXT_COLS * TEXT_ROWS * 2);
@@ -637,6 +738,10 @@ void bios_int10(CPU *cpu)
 void bios_int16(CPU *cpu)
 {
     KeyboardState *ks = &g_dos->keyboard;
+    static int trace = -1;
+    if (trace < 0) trace = getenv("BOLO_INT10") != NULL;
+    if (trace)
+        fprintf(stderr, "[int16] AH=%02X avail=%d\n", cpu->ah, keyboard_available(ks));
 
     switch (cpu->ah) {
     case 0x00: /* Read key (blocking) */
@@ -737,6 +842,26 @@ void int_handler(CPU *cpu, uint8_t num)
         cpu->halted = 1;
         break;
 
+    case 0x11: /* Equipment list = BDA word 0040:0010 */
+        cpu->ax = mem_read16(cpu, 0x0040, 0x0010);
+        break;
+
+    case 0x1A: /* BIOS clock. AH=0: CX:DX = ticks since midnight (0040:006C),
+                * AL = midnight flag. The game's delays spin on this until it
+                * changes, so let the timer run while they poll. */
+        if (cpu->ah == 0x00 && g_deterministic) {   /* replay mode: a tick per read */
+            static unsigned long t;
+            t++;
+            cpu->dx = (uint16_t)t; cpu->cx = (uint16_t)(t >> 16); cpu->al = 0;
+        } else if (cpu->ah == 0x00) {
+            if (g_host_pump) g_host_pump();
+            recomp_tick_now();
+            cpu->dx = mem_read16(cpu, 0x0040, 0x006C);
+            cpu->cx = mem_read16(cpu, 0x0040, 0x006E);
+            cpu->al = 0;
+        }
+        break;
+
     default:
         /* Most other interrupts are safe to ignore */
         break;
@@ -776,7 +901,8 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t value)
     }
 
     /* EGA Sequencer / Graphics Controller (SCREEN 9 planar) */
-    if (port == 0x3C4 || port == 0x3C5 || port == 0x3CE || port == 0x3CF) {
+    if (port == 0x3C4 || port == 0x3C5 || port == 0x3CE || port == 0x3CF ||
+        port == 0x3C0 || port == 0x3D4 || port == 0x3D5) {
         ega_port_write(port, value);
         return;
     }
@@ -794,8 +920,11 @@ uint8_t port_in8(CPU *cpu, uint16_t port)
 {
     DosState *ds = g_dos;
 
-    /* VGA status register */
+    /* VGA status register: the game polls it for retrace before each page
+     * flip, which makes it the natural place to show a frame */
     if (port == 0x3DA) {
+        ega_attr_reset();
+        if (g_host_pump) g_host_pump();
         return video_port_read(&ds->video, port);
     }
 
