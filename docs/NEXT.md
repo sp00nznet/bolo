@@ -33,8 +33,16 @@ Tools added: `BOLO_KEYS` `^U/^D/^L/^R`, `~`, `$`; `BOLO_DETERMINISTIC` + oracle
 Limit: gameplay can't be diffed exactly — the game's INT 8 ISR (QB sound queue)
 must fire, and the oracle has no timer.
 
-Next: sound (PC speaker, QB PLAY via INT 8 + PIT), audit the `ON…GOSUB`
-out-of-range case, commit.
+**Sound (done):** QB drives the PC speaker from its INT 8 handler and speeds
+PIT channel 0 up 32x (divisor 0800h) while a note plays, back to 65536 when its
+queue empties. icall.c now fires the game's INT 8 at the programmed rate on a
+QPC clock (BIOS tick + INT 1Ch stay 18.2 Hz); dos_compat tracks channel 2 +
+port 61h; main.c timestamps each tone change and the SDL callback replays them
+sample-accurately 50 ms behind real time (effects are 5-70 ms, shorter than an
+audio buffer). `BOLO_PORTTRACE=1` logs PIT/61h writes and IRQ-rate changes;
+`SDL_AUDIODRIVER=disk SDL_DISKAUDIOFILE=x.raw` captures output (s16 mono 44.1k).
+
+Next: audit the `ON…GOSUB` out-of-range case.
 
 
 ## ★★★★ (2026-09-25): the native recomp BOOTS TO THE PUZZLE MENU

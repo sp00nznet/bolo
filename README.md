@@ -76,7 +76,7 @@ puzzle layouts. Reversing those formats happens in parallel (see
 
 🎮 **It's playable.** The recompiled binary boots the way the original does —
 Soleau splash, title, puzzle list — and you can pick a puzzle and walk Mr. Bolo
-around it, entirely as native code.
+around it, with the original PC-speaker sound effects, entirely as native code.
 
 | Boot | Pick a puzzle | Play |
 |:---:|:---:|:---:|

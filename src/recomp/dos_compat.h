@@ -66,7 +66,9 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t value);
 uint8_t port_in8(CPU *cpu, uint16_t port);
 extern void (*g_host_pump)(void);   /* poll input + present, throttled by the host */
 void recomp_tick_now(void);
-extern int g_deterministic;          /* BOLO_DETERMINISTIC replay mode */         /* icall.c: fire the timer IRQ if one is due */
+extern int g_deterministic;          /* BOLO_DETERMINISTIC replay mode */
+extern volatile uint32_t g_speaker_hz; /* PC speaker tone, 0 = silent */
+extern void (*g_speaker_hook)(uint32_t hz);  /* called on every tone change */         /* icall.c: fire the timer IRQ if one is due */
 void port_out16(CPU *cpu, uint16_t port, uint16_t value);
 uint16_t port_in16(CPU *cpu, uint16_t port);
 

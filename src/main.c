@@ -140,10 +140,55 @@ static void host_pump(void)
 }
 static void pump_hook(void *ctx, void *ds, const void *cpu) { (void)ctx; (void)ds; (void)cpu; host_pump(); }
 
+/* PC speaker. QB's effects are 5-70 ms tones, shorter than an audio buffer, so
+ * the emulation side timestamps every change (spk_event) and the callback
+ * replays them sample-accurately a fixed latency behind real time. Square
+ * wave, phase carried across notes so tone changes don't click.
+ * ponytail: single-producer ring; drops events if the audio thread stalls
+ * for more than 1024 tone changes. */
+#define SPK_RING 1024
+#define SPK_LATENCY_S 0.05
+static struct { Uint64 t; uint32_t hz; } g_spk_ev[SPK_RING];
+static volatile unsigned g_spk_head, g_spk_tail;       /* producer, consumer */
+static void spk_event(uint32_t hz)
+{
+    unsigned h = g_spk_head;
+    if (h - g_spk_tail >= SPK_RING) return;             /* full: drop */
+    g_spk_ev[h % SPK_RING].t = SDL_GetPerformanceCounter();
+    g_spk_ev[h % SPK_RING].hz = hz;
+    g_spk_head = h + 1;
+}
+static void speaker_cb(void *ud, Uint8 *stream, int len)
+{
+    static double phase, t_audio;
+    static uint32_t hz;
+    (void)ud;
+    Sint16 *out = (Sint16 *)stream;
+    double pf = (double)SDL_GetPerformanceFrequency(), per_sample = pf / 44100.0;
+    double now = (double)SDL_GetPerformanceCounter(), want = now - SPK_LATENCY_S * pf;
+    if (t_audio == 0 || t_audio < want - 0.2 * pf || t_audio > now)
+        t_audio = want;                                  /* start, or resync after a stall */
+    for (int i = 0; i < len / 2; i++, t_audio += per_sample) {
+        while (g_spk_tail != g_spk_head && (double)g_spk_ev[g_spk_tail % SPK_RING].t <= t_audio)
+            hz = g_spk_ev[g_spk_tail++ % SPK_RING].hz;
+        out[i] = hz ? (phase < 0.5 ? 2500 : -2500) : 0;
+        phase += hz / 44100.0;
+        if (phase >= 1.0) phase -= (int)phase;
+    }
+}
+
 static void host_init(DosState *dos)
 {
     g_dosp = dos;
     if (SDL_Init(SDL_INIT_VIDEO) < 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return; }
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
+        SDL_AudioSpec want = {0}, have;
+        want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 1;
+        want.samples = 512; want.callback = speaker_cb;
+        SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+        if (dev) { g_speaker_hook = spk_event; SDL_PauseAudioDevice(dev, 0); }
+        else fprintf(stderr, "SDL audio: %s (continuing silent)\n", SDL_GetError());
+    }
     /* EGA 640x350 was shown on a 4:3 tube: stretch to 1280x960 */
     SDL_Window *w = SDL_CreateWindow("Bolo Adventures III", SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED, 1280, 960, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);

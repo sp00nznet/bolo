@@ -62,25 +62,48 @@ static void fire_isr(CPU *c, uint32_t v)
     recomp_dispatch(c, (uint16_t)(v >> 16), (uint16_t)v);
     c->sp = sp;
 }
-/* IRQ0 at the PC's real 18.2 Hz, by wall clock. Checked from function entry and
- * from every loop back-edge (RECOMP_TICK), so a spin loop waiting on the tick
- * count still sees it move. Held off while IF is clear, as the PIC would. */
+/* IRQ0 by wall clock, at whatever rate PIT channel 0 is programmed to: QB
+ * speeds it up 32x (divisor 0800h) while music plays and times its notes in
+ * those ticks. The BIOS work -- the 0040:006C tick count and INT 1Ch -- stays
+ * at 18.2 Hz, as the real BIOS handler the game chains to would do it (there is
+ * no BIOS here, so the chain itself goes nowhere). Checked from function entry
+ * and every loop back-edge (RECOMP_TICK); held off while IF is clear. */
 #include <windows.h>
+extern double dos_timer_hz(void);
 static void maybe_fire_timer(void)
 {
-    static ULONGLONG next;
+    static LARGE_INTEGER freq;
+    static LONGLONG next_irq, next_bios;
     if (g_host_pump) g_host_pump();
     if (g_in_timer || !g_dbg_cpu || !(g_dbg_cpu->flags & FLAG_IF) || g_deterministic > 0) return;
-    ULONGLONG now = GetTickCount64();
-    if (!next) next = now;
-    if (now < next) return;
-    next = (now - next > 500) ? now + 55 : next + 55;   /* after a stall, don't burst */
+    LARGE_INTEGER t;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t);
+    LONGLONG now = t.QuadPart;
+    LONGLONG bios_period = (LONGLONG)(freq.QuadPart / 18.2065);
+    LONGLONG irq_period = (LONGLONG)(freq.QuadPart / dos_timer_hz());
+    static int ptrace = -1;
+    if (ptrace < 0) ptrace = getenv("BOLO_PORTTRACE") != NULL;
+    if (ptrace) {
+        static double last;
+        if (dos_timer_hz() != last) { last = dos_timer_hz(); fprintf(stderr, "[pit] irq %.2f Hz\n", last); }
+    }
+    if (!next_irq) next_irq = next_bios = now;
+    if (now < next_irq && now < next_bios) return;
     g_in_timer = 1;
-    dos_tick(g_dbg_cpu);
-    uint32_t v = dos_get_vector(0x1C);
-    if (v) { g_timer_fires++; fire_isr(g_dbg_cpu, v); }
-    v = dos_get_vector(0x08);
-    if (v) fire_isr(g_dbg_cpu, v);
+    if (now >= next_bios) {
+        next_bios = (now - next_bios > freq.QuadPart / 2) ? now + bios_period
+                                                          : next_bios + bios_period;
+        dos_tick(g_dbg_cpu);
+        uint32_t v = dos_get_vector(0x1C);
+        if (v) { g_timer_fires++; fire_isr(g_dbg_cpu, v); }
+    }
+    for (int n = 0; now >= next_irq && n < 256; n++) { /* owed ticks; QB counts them */
+        next_irq += irq_period;
+        uint32_t v = dos_get_vector(0x08);
+        if (v) fire_isr(g_dbg_cpu, v);
+    }
+    if (now >= next_irq) next_irq = now + irq_period;
     g_in_timer = 0;
 }
 void recomp_tick_now(void) { maybe_fire_timer(); }

@@ -233,6 +233,20 @@ void dos_init(DosState *ds, CPU *cpu, const char *game_dir)
 /* ─── INT 21h - DOS API ─── */
 
 void (*g_host_pump)(void);   /* set by main: poll input + present a frame */
+
+/* PC speaker, read by the host's audio callback (another thread) */
+volatile uint32_t g_speaker_hz;          /* 0 = silent */
+void (*g_speaker_hook)(uint32_t hz);     /* host: timestamp each change */
+static uint16_t g_spk_div;               /* PIT channel 2 divisor */
+static int g_spk_hi;                     /* channel 2 low/high byte flip-flop */
+static uint8_t g_port61;                 /* bit 0 gates the PIT, bit 1 the speaker */
+static void speaker_update(void)
+{
+    uint32_t div = g_spk_div ? g_spk_div : 65536;
+    uint32_t hz = ((g_port61 & 3) == 3) ? 1193182u / div : 0;
+    if (hz != g_speaker_hz && g_speaker_hook) g_speaker_hook(hz);
+    g_speaker_hz = hz;
+}
 /* BOLO_DETERMINISTIC: clocks advance per call, not by wall time, and no timer
  * IRQ -- the same machine uni_original.py models, so traces can be diffed */
 int g_deterministic = -1;
@@ -869,6 +883,8 @@ void int_handler(CPU *cpu, uint8_t num)
 }
 
 /* ─── Timer-tick support (for firing the game's installed INT 1Ch/8 ISR) ─── */
+double dos_timer_hz(void) { return g_dos ? g_dos->timer.tick_rate_hz : 18.2065; }
+
 uint32_t dos_get_vector(unsigned n)
 {
     return g_dos ? g_dos->ivt[n & 0xFF] : 0;
@@ -893,6 +909,22 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t value)
         video_port_write(&ds->video, port, value);
         return;
     }
+
+    static int ptrace = -1;
+    if (ptrace < 0) ptrace = getenv("BOLO_PORTTRACE") != NULL;
+    if (ptrace && ((port >= 0x40 && port <= 0x43) || port == 0x61))
+        fprintf(stderr, "[port] %lu %02X <= %02X\n", (unsigned long)clock(), port, value);
+
+    /* PC speaker: PIT channel 2 sets the pitch, port 61h bits 0+1 gate it */
+    if (port == 0x42) {                 /* low byte, then high byte */
+        g_spk_div = g_spk_hi ? (uint16_t)((g_spk_div & 0x00FF) | value << 8)
+                             : (uint16_t)((g_spk_div & 0xFF00) | value);
+        g_spk_hi ^= 1;
+        if (!g_spk_hi) speaker_update();
+        return;
+    }
+    if (port == 0x43 && (value >> 6) == 2) g_spk_hi = 0;   /* channel 2 command */
+    if (port == 0x61) { g_port61 = value; speaker_update(); return; }
 
     /* PIT timer ports */
     if (port == 0x40 || port == 0x43) {
@@ -937,6 +969,8 @@ uint8_t port_in8(CPU *cpu, uint16_t port)
     if (port == 0x40) {
         return timer_port_read(&ds->timer, port);
     }
+
+    if (port == 0x61) return g_port61;
 
     /* Keyboard data port */
     if (port == 0x60) {
